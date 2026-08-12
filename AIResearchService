@@ -1,0 +1,3204 @@
+package com.wind.stock.airesearch.framework.service;
+
+import cn.com.wind.stock.base.common.bean.UserBean;
+import cn.com.wind.stock.base.componets.client.redis.sender.RedisManager;
+import cn.com.wind.stock.base.utils.GzipUtils;
+import cn.hutool.core.thread.ThreadUtil;
+import com.alibaba.fastjson.JSON;
+import com.alibaba.fastjson.JSONArray;
+import com.alibaba.fastjson.JSONObject;
+import com.ctrip.framework.apollo.Config;
+import com.ctrip.framework.apollo.spring.annotation.ApolloConfig;
+import com.wind.stock.airesearch.common.auth.InjectVariable;
+import com.wind.stock.airesearch.common.auth.MdcInjectAspect;
+import com.wind.stock.airesearch.common.bean.PDFcells;
+import com.wind.stock.airesearch.common.bean.PdfSearchRequestBean;
+import com.wind.stock.airesearch.common.burying.BuryingLog;
+import com.wind.stock.airesearch.common.client.AliceAigcAnswerHttpClient;
+import com.wind.stock.airesearch.common.client.HttpProxyDecorator;
+import com.wind.stock.airesearch.common.constants.Constants;
+import com.wind.stock.airesearch.common.expo.ocean.PdfOceanExpoClient;
+import com.wind.stock.airesearch.common.utils.ExceptionUtils;
+import com.wind.stock.airesearch.framework.bean.AliceRelevantSubmitResponseBean;
+import com.wind.stock.airesearch.framework.bean.BeanConverter;
+import com.wind.stock.airesearch.framework.bean.PmpAigcBean;
+import com.wind.stock.airesearch.framework.bean.entity.*;
+import com.wind.stock.airesearch.common.bean.PdfBean;
+import com.wind.stock.airesearch.framework.bean.request.*;
+import com.wind.stock.airesearch.framework.bean.response.PageResult;
+import com.wind.stock.airesearch.framework.bean.streamChat.StreamChatResponse;
+import com.wind.stock.airesearch.common.client.AliceRelevantHttpClient;
+import com.wind.stock.airesearch.framework.enums.MapEnumConstant;
+import com.wind.stock.airesearch.framework.job.TaskAIresearchJob;
+import com.wind.stock.airesearch.framework.mapper.entity.ResearchOverview;
+import com.wind.stock.airesearch.framework.mapper.mongo.MongoDBService;
+import com.wind.stock.airesearch.framework.mapper.mysql.ResearchOverviewMapper;
+import com.wind.stock.airesearch.framework.utils.DateUtils;
+import com.wind.stock.airesearch.framework.utils.MD5Util;
+import com.wind.stock.airesearch.framework.utils.StrUtils;
+import com.wind.stock.airesearch.imageInd.infrastructure.expo.ocean.bean.PdfQueriedDataBean;
+import com.wind.stock.airesearch.imageInd.infrastructure.expo.ocean.bean.req.PdfOceanRequestBean;
+import com.wind.stock.airesearch.imageInd.infrastructure.expo.ocean.bean.rsp.PdfOceanResponseBean;
+import com.wind.stock.airesearch.indicator.share.dto.QueryPubIndDto;
+import com.wind.stock.airesearch.indicator.domain.model.PubReportIndicator;
+import com.wind.stock.airesearch.indicator.domain.service.PubReportIndicatorService;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang.StringUtils;
+import org.slf4j.MDC;
+import org.springframework.beans.BeanUtils;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.stereotype.Service;
+import org.springframework.util.CollectionUtils;
+
+import java.text.SimpleDateFormat;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.stream.Collectors;
+
+/**
+ * AI投研框架- Service层.
+ * @author yangxw
+ * @date 2024/12/13
+ */
+@Slf4j
+@Service("AIResearchService")
+public class AIResearchService {
+
+    @ApolloConfig
+    private Config config;
+    @Autowired
+    private RedisManager redisManager;
+    @Autowired
+    @Qualifier("mongoDBService")
+    private MongoDBService mongoDBService;
+    @Autowired
+    private TeamIntroduceService teamIntroduceService;
+    @Autowired
+    private AliceAigcAnswerHttpClient aliceAigcAnswerHttpClient;
+    @Autowired
+    private OceanDecryptExpoClient oceanDecryptExpoClient;
+    @Autowired
+    @Qualifier("AliceRelevantHttpClient")
+    private AliceRelevantHttpClient aliceRelevantHttpClient;
+    @Autowired
+    private HttpProxyDecorator httpProxyDecorator;
+    @Autowired
+    @Qualifier("PdfOceanExpoClient")
+    private PdfOceanExpoClient pdfOceanExpoClient;
+    @Autowired
+    private ResearchOverviewMapper mapper;
+    @Autowired
+    private PubReportIndicatorService indicatorService;
+
+
+    /**
+     * AI投研框架->列表选项AIGC， 汇总用流输出
+     * @param request
+     * @return
+     */
+    public StreamChatResponse aiResearchAigc(AiResearchRequest request) {
+        log.info("AIResearchService.aiResearchAigc: {}", JSONObject.toJSON(request));
+        if(CollectionUtils.isEmpty(request.getDocBean()) || StringUtils.isBlank(request.getNodeType())){
+            return null;
+        }
+        if(request.getNodeType().equals(Constants.NodeType.ONE)){
+            //1:生成框架
+            StreamChatResponse streamChatResponse = this.aigcFramework(request);
+            return streamChatResponse;
+        } else if (request.getNodeType().equals(Constants.NodeType.TWO)) {
+            //2:拆解
+            StreamChatResponse streamChatResponse = this.aigcBreakDown(request);
+            return streamChatResponse;
+        }
+        return null;
+    }
+
+
+    /**
+     * AI投研框架->列表选项AIGC， 汇总用流输出  2:拆解
+     * @param request
+     * @return
+     */
+    public StreamChatResponse aigcBreakDown(AiResearchRequest request) {
+        String question = "拆解上市公司的研究内容";
+        //内容集合
+        StringBuffer resultList = new StringBuffer();
+        List<String> resultTxtList = new ArrayList<>();
+        //调用pmpAigc非流接口集合bean
+        List<PmpAigcBean> pmpAigcBeanList = new ArrayList<>();
+        MDC.put(InjectVariable.TRACE_QUESTION, question);
+        AiResearchRequest requestReids = new AiResearchRequest();
+        BeanUtils.copyProperties(request, requestReids);
+        List<DocBean> paramsList = request.getDocBean();
+        for (int i = 0; i < paramsList.size(); i++) {
+            DocBean docBean = paramsList.get(i);
+            if(!docBean.isSubmitFlag()){
+                //continue;
+            }
+            //设置缓存key
+            requestReids.setDocBean(new ArrayList<>());
+            List<DocBean> docBeanList = new ArrayList<>();
+            docBeanList.add(docBean);
+            requestReids.setDocBean(docBeanList);
+            String reidskey = "Wind.Stock.AIresearch.Framework" + String.format(".AIResearchService.aigcBreakDown::%s", MD5Util.encrypt32(JSON.toJSONString(requestReids)));
+            //1、原文切片 调用文档 获取文本内容
+            AliceRequestBean bean = new AliceRequestBean();
+            bean.setDocName(docBean.getDocName());
+            bean.setDocId(docBean.getDocId());
+            bean.setDocSource(Constants.DocSource.ONE);
+            bean.setUrl(docBean.getUrl());
+            bean.setDocType(Constants.DocType.THREE);
+            log.info("getPDF:{}", JSONObject.toJSON(bean));
+            //查询文档元信息
+            JSONObject jsonBean = this.getPDF(bean);
+            if(jsonBean==null){
+                log.info(".AIResearchService.aigcBreakDownNoStream -> jsonBean:{}, DocName:{}", jsonBean, docBean.getDocName());
+                continue;
+            }
+            //解析文档元信息  原文切片
+            List<String> breakPDFList = this.analysisBreakPDF(jsonBean, docBean.getPagesizeSplit());
+            StringBuffer breakText = new StringBuffer();
+            if (!CollectionUtils.isEmpty(breakPDFList)) {
+                //原文切片 调用pmpAigc非流接口集合bean
+                List<PmpAigcBean> breakAigcBeanList = new ArrayList<>();
+                for (String strText: breakPDFList) {
+                    Map<String,String> paraMap = new HashMap<>();
+                    paraMap.put("companyName", request.getCompanyName());
+                    paraMap.put("content", strText);
+                    paraMap.put("question", question);
+                    //用pmpAigc非流接口集合bean 前组装数据 用线程执行
+                    PmpAigcBean breakAigcBean = new PmpAigcBean();
+                    breakAigcBean.setReidskey(reidskey);
+                    breakAigcBean.setDocId(docBean.getDocId());
+                    breakAigcBean.setTitle(docBean.getTitle());
+                    breakAigcBean.setPromptId(docBean.getPromptId());
+                    breakAigcBean.setDocName(docBean.getDocName());
+                    breakAigcBean.setUrl(docBean.getUrl());
+                    breakAigcBean.setEventStreamFlg(true);
+                    breakAigcBean.setParaMap(paraMap);
+                    breakAigcBean.setTaskId(docBean.getTaskId());
+                    breakAigcBean.setWindCode(docBean.getWindCode());
+                    breakAigcBean.setNodeType(request.getNodeType());
+                    breakAigcBeanList.add(breakAigcBean);
+                }
+
+                List<String> breakTxtList = new ArrayList<>();
+                //start 原文切片 线程
+                if (breakAigcBeanList.size() > 0) {
+                    ExecutorService executorService = new ThreadPoolExecutor(breakAigcBeanList.size(), breakAigcBeanList.size(), 0, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>());
+                    List<Callable<Object>> tasks = new LinkedList<>();
+                    try {
+                        for (PmpAigcBean pmpAigcBean: breakAigcBeanList) {
+                            log.info("AIResearchService.break.pmpAigcNoStreamThread docName:{}", pmpAigcBean.getDocName());
+                            Map<String, String> copyOfContextMap = MDC.getCopyOfContextMap();
+                            tasks.add(() -> {
+                                try {
+                                    MDC.setContextMap(copyOfContextMap);
+                                    aliceAigcAnswerHttpClient.pmpAigcNoStreamThread(breakTxtList, pmpAigcBean);
+                                    return null;
+                                } catch (Exception e) {
+                                    throw new RuntimeException(e);
+                                } finally {
+                                    MDC.clear();
+                                }
+                            });
+                        }
+                        executorService.invokeAll(tasks, 120, TimeUnit.SECONDS);
+                    } catch (Exception e) {
+                        log.error("executorService:", e);
+                    } finally {
+                        // 关闭线程池 并等待所有任务完成
+                        executorService.shutdown();
+                    }
+                    //判断线程是否执行完毕
+                    boolean isTerminated = executorService.isTerminated();
+                    log.info("AIResearchService.break.isTerminated:{}, breakTxtList.size()={}", isTerminated, breakTxtList.size());
+                }
+                //原文切片AIGC 内容汇总
+                for (String result: breakTxtList) {
+                    breakText.append("\n\n").append(result);
+                }
+
+                //3、合并AIGC内容，再次调用AIGC非流接口 breakText 合并在AIGC  固定值 P042848
+                String promptId = Constants.PromptId.PromptId_2_P042848;
+                String companyName = request.getCompanyName();
+                String content = breakText.toString();
+                HashMap promptParams = new HashMap();
+                if (StringUtils.isNotBlank(companyName)) {
+                    promptParams.put("companyName", companyName);
+                }
+                if (StringUtils.isNotBlank(question)) {
+                    promptParams.put("question", question);
+                }
+                if (StringUtils.isNotBlank(content)) {
+                    promptParams.put("content", content);
+                }
+                String answer = aliceAigcAnswerHttpClient.pmpAigcNoStreamNew(promptParams, promptId);
+                //存库
+                if (StringUtils.isNotEmpty(answer)) {
+                    AiGcBaseRequest temp = new AiGcBaseRequest();
+                    temp.setDocId(docBean.getDocId());
+                    temp.setWindCode(docBean.getWindCode());
+                    temp.setPromptId(promptId);
+                    temp.setNodeType(request.getNodeType());
+                    temp.setText(answer);
+                    temp.setCreator("systemt");
+                    mongoDBService.insertMongoAiGcBase(temp);
+                }
+                //end
+
+                //2、调用AIGC非流接口，获取内容
+                boolean eventStreamFlg = request.getEventStreamFlg();
+                Map<String,String> paraMap = new HashMap<>();
+                paraMap.put("companyName", request.getCompanyName());
+                paraMap.put("content", answer);
+                paraMap.put("question", question);
+                //用pmpAigc非流接口集合bean 前组装数据 用线程执行
+                PmpAigcBean pmpAigcBean = new PmpAigcBean();
+                pmpAigcBean.setReidskey(reidskey);
+                pmpAigcBean.setDocId(docBean.getDocId());
+                pmpAigcBean.setPromptId(request.getPromptId());
+                pmpAigcBean.setEventStreamFlg(eventStreamFlg);
+                pmpAigcBean.setParaMap(paraMap);
+                pmpAigcBean.setWindCode(docBean.getWindCode());
+                pmpAigcBean.setNodeType(request.getNodeType());
+                pmpAigcBeanList.add(pmpAigcBean);
+            }
+        }
+
+        //start 线程
+        if (pmpAigcBeanList.size() > 0) {
+            ExecutorService executorService = new ThreadPoolExecutor(pmpAigcBeanList.size(), pmpAigcBeanList.size(), 0, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>());
+            List<Callable<Object>> tasks = new LinkedList<>();
+            try {
+                for (PmpAigcBean pmpAigcBean: pmpAigcBeanList) {
+                    AiGcBaseRequest baseRequest = new AiGcBaseRequest();
+                    baseRequest.setDocId(pmpAigcBean.getDocId());
+                    baseRequest.setWindCode(pmpAigcBean.getWindCode());
+                    baseRequest.setPromptId(pmpAigcBean.getPromptId());
+                    baseRequest.setNodeType(pmpAigcBean.getNodeType());
+                    String mongoValue = mongoDBService.findMongoAiGcBase(baseRequest);
+                    if (StringUtils.isNotEmpty(mongoValue)) {
+                        resultTxtList.add(mongoValue);
+                        log.info("findMongoPreproc.docId:{}", pmpAigcBean.getDocId());
+                        log.info("findMongoPreproc.mongoValue:{}", mongoValue);
+                    } else {
+                        Map<String, String> copyOfContextMap = MDC.getCopyOfContextMap();
+                        tasks.add(() -> {
+                            try {
+                                MDC.setContextMap(copyOfContextMap);
+                                aliceAigcAnswerHttpClient.pmpAigcNoStreamThread(resultTxtList, pmpAigcBean);
+                                return null;
+                            } catch (Exception e) {
+                                throw new RuntimeException(e);
+                            } finally {
+                                MDC.clear();
+                            }
+                        });
+                    }
+                }
+                executorService.invokeAll(tasks, 120, TimeUnit.SECONDS);
+            } catch (Exception e) {
+                log.error("executorService:", e);
+            } finally {
+                // 关闭线程池 并等待所有任务完成
+                executorService.shutdown();
+            }
+            //判断线程是否执行完毕
+            boolean isTerminated = executorService.isTerminated();
+            log.info("AIResearchService.isTerminated:{}, resultTxtList.size()={}", isTerminated, resultTxtList.size());
+        }
+        //end
+
+        //内容合并
+        for (String result: resultTxtList) {
+            resultList.append("\n\n").append(result);
+        }
+
+        if(StringUtils.isEmpty(resultList.toString())){
+            return null;
+        }
+        //3、合并AIGC内容，再次调用AIGC流接口
+        String promptId = request.getPromptId();
+        String companyName = request.getCompanyName();
+        StreamChatResponse streamChatResponse = aliceAigcAnswerHttpClient.aigcResearchInfo("", promptId, companyName, resultList.toString(), question, "");
+        return streamChatResponse;
+    }
+
+    /**
+     * AI投研框架->列表选项AIGC， 汇总用流输出  1:生成框架
+     * @param request
+     * @return
+     */
+    public StreamChatResponse aigcFramework(AiResearchRequest request) {
+        String question = "总结上市公司的研究框架";
+        //内容集合
+        StringBuffer resultList = new StringBuffer();
+        List<String> resultTxtList = new ArrayList<>();
+        //调用pmpAigc非流接口集合bean
+        List<PmpAigcBean> pmpAigcBeanList = new ArrayList<>();
+        MDC.put(InjectVariable.TRACE_QUESTION, question);
+        AiResearchRequest requestReids = new AiResearchRequest();
+        BeanUtils.copyProperties(request, requestReids);
+
+        List<DocBean> paramsList = request.getDocBean();
+        for (int i = 0; i < paramsList.size(); i++) {
+            DocBean docBean = paramsList.get(i);
+            if(!docBean.isSubmitFlag()){
+                continue;
+            }
+            //设置缓存key
+            requestReids.setDocBean(new ArrayList<>());
+            List<DocBean> docBeanList = new ArrayList<>();
+            docBeanList.add(docBean);
+            requestReids.setDocBean(docBeanList);
+            String reidskey = "Wind.Stock.AIresearch.Framework" + String.format(".AIResearchService.aigcFramework::%s", MD5Util.encrypt32(JSON.toJSONString(requestReids)));
+
+            String contentText = "";
+
+            //1、调用向量召回接口 获取文本内容
+            if (StringUtils.isEmpty(contentText)) {
+                //start 向量召回接口  切换新项目 Wind.Stock.DocRecall.Service
+                //String lan = "cn";
+                String docSource = "1";
+                String oceanId = oceanDecryptExpoClient.decrypt(docBean.getDocId(), docSource);
+                //OceanDocumentDetailBean.Paragraph[] paragraphs = aliceRelevantHttpClient.retrieveV4(lan, oceanId, question, docSource);
+                //contentText = Arrays.stream(paragraphs).map(OceanDocumentDetailBean.Paragraph::getText).collect(Collectors.joining("\n"));
+                contentText = aliceRelevantHttpClient.retrieveV4(oceanId, question);
+                //end
+                log.info("AIResearchService.aigcFramework.retrieveV4 result  -> docName：{}", docBean.getDocName());
+            }
+            if(StringUtils.isEmpty(contentText)){
+                log.info("AIResearchService.contentText isEmpty 向量召回返回失败 -> docName：{}", docBean.getDocName());
+                continue;
+            }
+            //2、调用AIGC非流接口，获取内容
+            String promptId = docBean.getPromptId();
+            Map<String,String> paraMap = new HashMap<>();
+            paraMap.put("companyName", request.getCompanyName());
+            paraMap.put("content", contentText);
+            paraMap.put("question", question);
+            //用pmpAigc非流接口集合bean 前组装数据 用线程执行
+            PmpAigcBean pmpAigcBean = new PmpAigcBean();
+            pmpAigcBean.setReidskey(reidskey);
+            pmpAigcBean.setDocId(docBean.getDocId());
+            pmpAigcBean.setTitle(docBean.getTitle());
+            pmpAigcBean.setPromptId(promptId);
+            pmpAigcBean.setParaMap(paraMap);
+            pmpAigcBean.setEventStreamFlg(true);
+            pmpAigcBean.setTaskId(docBean.getTaskId());
+            pmpAigcBean.setWindCode(docBean.getWindCode());
+            pmpAigcBean.setNodeType(request.getNodeType());
+            pmpAigcBeanList.add(pmpAigcBean);
+        }
+
+        if(request.isSelfDocFlg() && pmpAigcBeanList.size() > 0){
+            //是否N+1 自有文档 固定值  P045503
+            PmpAigcBean pmpAigcBean1 = new PmpAigcBean();
+            String md5 = pmpAigcBeanList.get(0).getWindCode() + request.getCompanyName();
+            pmpAigcBean1.setDocId(MD5Util.encrypt32(md5));
+            pmpAigcBean1.setTitle(request.getCompanyName()+ "-自有文档");
+            pmpAigcBean1.setPromptId(Constants.PromptId.PromptId_1_P045503);
+            Map<String,String> paraMap1 = new HashMap<>();
+            paraMap1.put("companyName", request.getCompanyName());
+            pmpAigcBean1.setParaMap(paraMap1);
+            pmpAigcBean1.setEventStreamFlg(true);
+            pmpAigcBean1.setWindCode(pmpAigcBeanList.get(0).getWindCode());
+            pmpAigcBean1.setNodeType(request.getNodeType());
+            String reidskey1 = "Wind.Stock.AIresearch.Framework" + String.format(".AIResearchService.aigcFramework.isNpromptIdFlg::%s", MD5Util.encrypt32(JSON.toJSONString(pmpAigcBean1)));
+            pmpAigcBean1.setReidskey(reidskey1);
+            pmpAigcBeanList.add(pmpAigcBean1);
+        }
+
+        //start 线程
+        if (pmpAigcBeanList.size() > 0) {
+            ExecutorService executorService = new ThreadPoolExecutor(pmpAigcBeanList.size(), pmpAigcBeanList.size(), 0, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>());
+            List<Callable<Object>> tasks = new LinkedList<>();
+            try {
+                for (PmpAigcBean pmpAigcBean: pmpAigcBeanList) {
+                    AiGcBaseRequest baseRequest = new AiGcBaseRequest();
+                    baseRequest.setDocId(pmpAigcBean.getDocId());
+                    baseRequest.setWindCode(pmpAigcBean.getWindCode());
+                    baseRequest.setPromptId(pmpAigcBean.getPromptId());
+                    baseRequest.setNodeType(pmpAigcBean.getNodeType());
+                    String mongoValue = mongoDBService.findMongoAiGcBase(baseRequest);
+                    if (StringUtils.isNotEmpty(mongoValue)) {
+                        resultTxtList.add(mongoValue);
+                    } else {
+                        Map<String, String> copyOfContextMap = MDC.getCopyOfContextMap();
+                        log.info("AIResearchService.pmpAigcNoStreamThread docName:{}", pmpAigcBean.getDocName());
+                        tasks.add(() -> {
+                            try {
+                                MDC.setContextMap(copyOfContextMap);
+                                aliceAigcAnswerHttpClient.pmpAigcNoStreamThread(resultTxtList, pmpAigcBean);
+                                return null;
+                            } catch (Exception e) {
+                                throw new RuntimeException(e);
+                            }finally {
+                                MDC.clear();
+                            }
+                        });
+                    }
+                }
+                executorService.invokeAll(tasks, 120, TimeUnit.SECONDS);
+            } catch (Exception e) {
+                log.error("AIResearchService.executorService:", e);
+            } finally {
+                // 关闭线程池 并等待所有任务完成
+                executorService.shutdown();
+            }
+            //判断线程是否执行完毕
+            boolean isTerminated = executorService.isTerminated();
+            log.info("AIResearchService.isTerminated:{}, resultTxtList.size()={}", isTerminated, resultTxtList.size());
+        }
+        //end
+
+        //内容合并
+        for (String result: resultTxtList) {
+            resultList.append("\n\n").append(result);
+        }
+
+        if(StringUtils.isEmpty(resultList.toString())){
+            return null;
+        }
+
+        if (resultTxtList.size() > 0) {
+            //start  单个文档AIGC内容存 MongoDB 预先执行AIGC
+            for (PmpAigcBean pmpAigcBean: pmpAigcBeanList) {
+                //缓存数据
+                String reidsvalue = redisManager.get(pmpAigcBean.getReidskey());
+                if (StringUtils.isNotEmpty(reidsvalue)) {
+                    AiGcBaseRequest temp = new AiGcBaseRequest();
+                    temp.setDocId(pmpAigcBean.getDocId());
+                    temp.setWindCode(pmpAigcBean.getWindCode());
+                    temp.setPromptId(pmpAigcBean.getPromptId());
+                    temp.setText(reidsvalue);
+                    temp.setNodeType(pmpAigcBean.getNodeType());
+                    temp.setCreator("systemt");
+                    mongoDBService.insertMongoAiGcBase(temp);
+                }
+            }
+            //end
+        }
+        //end
+
+        //股票代码 查找行业，映射枚举值
+        String industryType = "";
+        String framework = "";
+        if(request.getNodeType().equals(Constants.NodeType.ONE)){
+            String windCode = request.getDocBean().get(0).getWindCode();
+            String userId = config.getProperty("data.framework.userId", "6938791");
+            List<String> industryTypeList = teamIntroduceService.getIndustryType(windCode, Long.valueOf(userId));
+            log.info("industryTypeList:{}", JSONObject.toJSON(industryTypeList));
+            if(!CollectionUtils.isEmpty(industryTypeList)){
+                industryType = industryTypeList.get(0);
+                framework = MapEnumConstant.industryTypeMap.get(industryType);
+            }
+            log.info("windCode:{}, industryType:{}, framework:{}", windCode, industryType, framework);
+        }
+
+        //3、合并AIGC内容，再次调用AIGC流接口
+        String promptId = request.getPromptId();
+        String companyName = request.getCompanyName();
+        StreamChatResponse streamChatResponse = aliceAigcAnswerHttpClient.aigcResearchInfo(framework, promptId, companyName, resultList.toString(), question, "");
+        return streamChatResponse;
+    }
+
+
+
+
+    /**
+     * AI投研框架->列表选项AIGC， 汇总用流输出
+     * @param request
+     * @return
+     */
+    public String aiResearchAigcNoStream(AiResearchRequest request) {
+        log.info("aiResearchAigcNoStream: {}", JSONObject.toJSON(request));
+        if(CollectionUtils.isEmpty(request.getDocBean()) || StringUtils.isBlank(request.getNodeType())){
+            return null;
+        }
+        String answer = "";
+        //请求报文唯一标识
+        Set<PmpAigcBean> md5AigcBeanList = new TreeSet<>();
+        List<DocBean> md5paramsList = request.getDocBean();
+        for (int i = 0; i < md5paramsList.size(); i++) {
+            DocBean docBean = md5paramsList.get(i);
+            PmpAigcBean md5AigcBean = new PmpAigcBean();
+            md5AigcBean.setDocId(docBean.getDocId());
+            md5AigcBean.setDocName(docBean.getDocName());
+            md5AigcBean.setPromptId(docBean.getPromptId());
+            md5AigcBean.setWindCode(docBean.getWindCode());
+            md5AigcBean.setNodeType(request.getNodeType());
+            md5AigcBeanList.add(md5AigcBean);
+        }
+        // 排序
+        List<PmpAigcBean> sortedList = md5AigcBeanList.stream().sorted(Comparator.comparing(PmpAigcBean::getDocId)).collect(Collectors.toList());
+        String md5 = MD5Util.encrypt32(JSON.toJSONString(sortedList));
+        request.setMd5(md5);
+
+        AiGcPreprocRequest preprocRequest = new AiGcPreprocRequest();
+        preprocRequest.setMd5(request.getMd5());
+        preprocRequest.setWindCode(request.getDocBean().get(0).getWindCode());
+        preprocRequest.setNodeType(request.getNodeType());
+        String answerMG = this.getHangTreeText(preprocRequest);
+        if(StringUtils.isNotEmpty(answerMG)){
+            return answerMG;
+        }
+
+        if(request.getNodeType().equals(Constants.NodeType.ONE)){
+            //1:生成框架
+            answer = this.aigcFrameworkNoStream(request);
+        } else if (request.getNodeType().equals(Constants.NodeType.TWO)) {
+            //2:拆解
+            answer = this.aigcBreakDownNoStream(request);
+        }
+        return answer;
+    }
+
+    /**
+     * AI投研框架->列表选项AIGC， 汇总用流输出  2:拆解
+     * @param request
+     * @return
+     */
+    public String aigcBreakDownNoStream(AiResearchRequest request) {
+        String question = "拆解上市公司的研究内容";
+        //内容集合
+        StringBuffer resultList = new StringBuffer();
+        List<String> resultTxtList = new ArrayList<>();
+        //调用pmpAigc非流接口集合bean
+        List<PmpAigcBean> pmpAigcBeanList = new ArrayList<>();
+        //执行AIGC文档列表 //勾选的文档ID，过滤向量失败的文档ID
+        List<DocListBean> docListBeanList = new ArrayList<>();
+
+        AiResearchRequest requestReids = new AiResearchRequest();
+        BeanUtils.copyProperties(request, requestReids);
+        List<DocBean> paramsList = request.getDocBean();
+        for (int i = 0; i < paramsList.size(); i++) {
+            DocBean docBean = paramsList.get(i);
+            if(!docBean.isSubmitFlag()){
+                //continue;
+            }
+            //设置缓存key
+            requestReids.setDocBean(new ArrayList<>());
+            List<DocBean> docBeanList = new ArrayList<>();
+            docBeanList.add(docBean);
+            requestReids.setDocBean(docBeanList);
+            String reidskey = "Wind.Stock.AIresearch.Framework" + String.format(".AIResearchService.aigcBreakDownNoStream::%s", MD5Util.encrypt32(JSON.toJSONString(requestReids)));
+            //1、原文切片 调用文档 获取文本内容
+            AliceRequestBean bean = new AliceRequestBean();
+            bean.setDocName(docBean.getDocName());
+            bean.setDocId(docBean.getDocId());
+            bean.setDocSource(Constants.DocSource.ONE);
+            bean.setUrl(docBean.getUrl());
+            bean.setDocType(request.getDocType());
+            log.info("getPDF:{}", JSONObject.toJSON(bean));
+            //查询文档元信息
+            JSONObject jsonBean = this.getPDF(bean);
+            if(jsonBean==null){
+                log.info(".AIResearchService.aigcBreakDownNoStream -> jsonBean:{}, DocName:{}", jsonBean, docBean.getDocName());
+                continue;
+            }
+            //解析文档元信息  原文切片
+            List<String> breakPDFList = this.analysisBreakPDF(jsonBean, docBean.getPagesizeSplit());
+            StringBuffer breakText = new StringBuffer();
+            if (!CollectionUtils.isEmpty(breakPDFList)) {
+                //原文切片 调用pmpAigc非流接口集合bean
+                List<PmpAigcBean> breakAigcBeanList = new ArrayList<>();
+                for (String strText: breakPDFList) {
+                    Map<String,String> paraMap = new HashMap<>();
+                    paraMap.put("companyName", request.getCompanyName());
+                    paraMap.put("content", strText);
+                    paraMap.put("question", question);
+                    //用pmpAigc非流接口集合bean 前组装数据 用线程执行
+                    PmpAigcBean breakAigcBean = new PmpAigcBean();
+                    breakAigcBean.setReidskey(reidskey);
+                    breakAigcBean.setDocId(docBean.getDocId());
+                    breakAigcBean.setTitle(docBean.getTitle());
+                    breakAigcBean.setPromptId(docBean.getPromptId());
+                    breakAigcBean.setDocName(docBean.getDocName());
+                    breakAigcBean.setUrl(docBean.getUrl());
+                    breakAigcBean.setEventStreamFlg(true);
+                    breakAigcBean.setParaMap(paraMap);
+                    breakAigcBean.setTaskId(docBean.getTaskId());
+                    breakAigcBean.setWindCode(docBean.getWindCode());
+                    breakAigcBean.setNodeType(request.getNodeType());
+                    breakAigcBeanList.add(breakAigcBean);
+                }
+
+                List<String> breakTxtList = new ArrayList<>();
+                //start 原文切片 线程
+                if (breakAigcBeanList.size() > 0) {
+                    ExecutorService executorService = new ThreadPoolExecutor(breakAigcBeanList.size(), breakAigcBeanList.size(), 0, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>());
+                    List<Callable<Object>> tasks = new LinkedList<>();
+                    Map<String, String> copyOfContextMap = MDC.getCopyOfContextMap();
+                    UserBean userBean = InjectVariable.getThreadLocal();
+                    try {
+                        for (PmpAigcBean pmpAigcBean: breakAigcBeanList) {
+                            log.info("AIResearchService.break.pmpAigcNoStreamThread docName:{}", pmpAigcBean.getDocName());
+                            tasks.add(() -> {
+                                try {
+                                    MDC.setContextMap(copyOfContextMap);
+                                    InjectVariable.setThreadLocal(userBean);
+                                    aliceAigcAnswerHttpClient.pmpAigcNoStreamThread(breakTxtList, pmpAigcBean);
+                                    return null;
+                                } catch (Exception e) {
+                                    throw new RuntimeException(e);
+                                } finally {
+                                    MDC.clear();
+                                    InjectVariable.removeThreadLocal();
+                                }
+                            });
+                        }
+                        executorService.invokeAll(tasks, 120, TimeUnit.SECONDS);
+                    } catch (Exception e) {
+                        log.error("executorService:", e);
+                    } finally {
+                        // 关闭线程池 并等待所有任务完成
+                        executorService.shutdown();
+                    }
+                    //判断线程是否执行完毕
+                    boolean isTerminated = executorService.isTerminated();
+                    log.info("AIResearchService.break.isTerminated:{}, breakTxtList.size()={}", isTerminated, breakTxtList.size());
+                }
+                //原文切片AIGC 内容汇总
+                for (String result: breakTxtList) {
+                    breakText.append("\n\n").append(result);
+                }
+
+                //3、合并AIGC内容，再次调用AIGC非流接口 breakText 合并在AIGC  固定值 P042848
+                String promptId = Constants.PromptId.PromptId_2_P042848;
+                String companyName = request.getCompanyName();
+                String content = breakText.toString();
+                HashMap promptParams = new HashMap();
+                if (StringUtils.isNotBlank(companyName)) {
+                    promptParams.put("companyName", companyName);
+                }
+                if (StringUtils.isNotBlank(question)) {
+                    promptParams.put("question", question);
+                }
+                if (StringUtils.isNotBlank(content)) {
+                    promptParams.put("content", content);
+                }
+                String answer = aliceAigcAnswerHttpClient.pmpAigcNoStreamNew(promptParams, promptId);
+                //存库
+                if (StringUtils.isNotEmpty(answer)) {
+                    AiGcBaseRequest temp = new AiGcBaseRequest();
+                    temp.setDocId(docBean.getDocId());
+                    temp.setWindCode(docBean.getWindCode());
+                    temp.setPromptId(promptId);
+                    temp.setNodeType(request.getNodeType());
+                    temp.setText(answer);
+                    temp.setCreator("systemt");
+                    mongoDBService.insertMongoAiGcBase(temp);
+                }
+                //end
+
+                //2、调用AIGC非流接口，获取内容
+                boolean eventStreamFlg = request.getEventStreamFlg();
+                Map<String,String> paraMap = new HashMap<>();
+                paraMap.put("companyName", request.getCompanyName());
+                paraMap.put("content", answer);
+                paraMap.put("question", question);
+                //用pmpAigc非流接口集合bean 前组装数据 用线程执行
+                PmpAigcBean pmpAigcBean = new PmpAigcBean();
+                pmpAigcBean.setReidskey(reidskey);
+                pmpAigcBean.setDocId(docBean.getDocId());
+                pmpAigcBean.setPromptId(request.getPromptId());
+                pmpAigcBean.setEventStreamFlg(eventStreamFlg);
+                pmpAigcBean.setParaMap(paraMap);
+                pmpAigcBean.setWindCode(docBean.getWindCode());
+                pmpAigcBean.setNodeType(request.getNodeType());
+                pmpAigcBeanList.add(pmpAigcBean);
+
+                DocListBean docListBean = new DocListBean();
+                docListBean.setFrameworkDocId(pmpAigcBean.getDocId());
+                docListBean.setFrameworkDocName(pmpAigcBean.getDocName());
+                docListBeanList.add(docListBean);
+            }
+        }
+
+        //start 线程
+        if (pmpAigcBeanList.size() > 0) {
+            ExecutorService executorService = new ThreadPoolExecutor(pmpAigcBeanList.size(), pmpAigcBeanList.size(), 0, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>());
+            List<Callable<Object>> tasks = new LinkedList<>();
+            try {
+                Map<String, String> copyOfContextMap = MDC.getCopyOfContextMap();
+                UserBean userBean = InjectVariable.getThreadLocal();
+                for (PmpAigcBean pmpAigcBean: pmpAigcBeanList) {
+                    AiGcBaseRequest baseRequest = new AiGcBaseRequest();
+                    baseRequest.setDocId(pmpAigcBean.getDocId());
+                    baseRequest.setWindCode(pmpAigcBean.getWindCode());
+                    baseRequest.setPromptId(pmpAigcBean.getPromptId());
+                    baseRequest.setNodeType(pmpAigcBean.getNodeType());
+                    String mongoValue = mongoDBService.findMongoAiGcBase(baseRequest);
+                    if (StringUtils.isNotEmpty(mongoValue)) {
+                        resultTxtList.add(mongoValue);
+                        log.info("findMongoPreproc.docId:{}", pmpAigcBean.getDocId());
+                        log.info("findMongoPreproc.mongoValue:{}", mongoValue);
+                    } else {
+                        tasks.add(() -> {
+                            try {
+                                MDC.setContextMap(copyOfContextMap);
+                                InjectVariable.setThreadLocal(userBean);
+                                aliceAigcAnswerHttpClient.pmpAigcNoStreamThread(resultTxtList, pmpAigcBean);
+                                return null;
+                            } catch (Exception e) {
+                                throw new RuntimeException(e);
+                            } finally {
+                                InjectVariable.removeThreadLocal();
+                                MDC.clear();
+                            }
+                        });
+                    }
+                }
+                executorService.invokeAll(tasks, 120, TimeUnit.SECONDS);
+            } catch (Exception e) {
+                log.error("executorService:", e);
+            } finally {
+                // 关闭线程池 并等待所有任务完成
+                executorService.shutdown();
+            }
+            //判断线程是否执行完毕
+            boolean isTerminated = executorService.isTerminated();
+            log.info("AIResearchService.isTerminated:{}, resultTxtList.size()={}", isTerminated, resultTxtList.size());
+        }
+        //end
+
+        //内容合并
+        for (String result: resultTxtList) {
+            resultList.append("\n\n").append(result);
+        }
+
+        if(StringUtils.isEmpty(resultList.toString())){
+            return null;
+        }
+        //3、合并AIGC内容，再次调用AIGC非流接口
+        String promptId = request.getPromptId();
+        String companyName = request.getCompanyName();
+        String content = resultList.toString();
+
+        HashMap promptParams = new HashMap();
+        if (StringUtils.isNotBlank(companyName)) {
+            promptParams.put("companyName", companyName);
+        }
+        if (StringUtils.isNotBlank(question)) {
+            promptParams.put("question", question);
+        }
+        if (StringUtils.isNotBlank(content)) {
+            promptParams.put("content", content);
+        }
+        String answer = aliceAigcAnswerHttpClient.pmpAigcNoStreamNew(promptParams, promptId);
+
+        AiGcPreprocRequest preprocRequest = new AiGcPreprocRequest();
+        preprocRequest.setWindCode(request.getDocBean().get(0).getWindCode());
+        preprocRequest.setNodeType(request.getNodeType());
+        preprocRequest.setPromptId(request.getPromptId());
+        preprocRequest.setText(answer.toString());
+        preprocRequest.setDocListBean(docListBeanList);
+        preprocRequest.setMd5(request.getMd5());
+        this.saveHangTree(preprocRequest);
+
+        return answer;
+    }
+
+    /**
+     * AI投研框架->列表选项AIGC， 汇总用流输出  1:生成框架
+     * @param request
+     * @return
+     */
+    public String aigcFrameworkNoStream(AiResearchRequest request) {
+        String question = "总结上市公司的研究框架";
+        //内容集合
+        StringBuffer resultList = new StringBuffer();
+        List<String> resultTxtList = new ArrayList<>();
+        //调用pmpAigc非流接口集合bean
+        List<PmpAigcBean> pmpAigcBeanList = new ArrayList<>();
+
+        AiResearchRequest requestReids = new AiResearchRequest();
+        BeanUtils.copyProperties(request, requestReids);
+        MDC.put(InjectVariable.TRACE_QUESTION, question);
+        List<DocBean> paramsList = request.getDocBean();
+        for (int i = 0; i < paramsList.size(); i++) {
+            DocBean docBean = paramsList.get(i);
+            if(!docBean.isSubmitFlag()){
+                continue;
+            }
+            //设置缓存key
+            requestReids.setDocBean(new ArrayList<>());
+            List<DocBean> docBeanList = new ArrayList<>();
+            docBeanList.add(docBean);
+            requestReids.setDocBean(docBeanList);
+            String reidskey = "Wind.Stock.AIresearch.Framework" + String.format(".AIResearchService.aigcFrameworkNoStream::%s", MD5Util.encrypt32(JSON.toJSONString(requestReids)));
+
+            String contentText = "";
+            //1、调用向量召回接口 获取文本内容
+            if (StringUtils.isEmpty(contentText)) {
+                //String lan = "cn";
+                String docSource = "1";
+                String oceanId = oceanDecryptExpoClient.decrypt(docBean.getDocId(), docSource);
+                //start 向量召回接口  切换新项目 Wind.Stock.DocRecall.Service
+                //OceanDocumentDetailBean.Paragraph[] paragraphs = aliceRelevantHttpClient.retrieveV4(lan, oceanId, question, docSource);
+                //contentText = Arrays.stream(paragraphs).map(OceanDocumentDetailBean.Paragraph::getText).collect(Collectors.joining("\n"));
+                contentText = aliceRelevantHttpClient.retrieveV4(oceanId, question);
+                //end
+                log.info("AIResearchService.aigcFramework.retrieveV4 result  -> docName：{}", docBean.getDocName());
+            }
+            if(StringUtils.isEmpty(contentText)){
+                log.info("AIResearchService.contentText isEmpty 向量召回返回失败 -> docName：{}", docBean.getDocName());
+                continue;
+            }
+            //2、调用AIGC非流接口，获取内容
+            String promptId = docBean.getPromptId();
+            Map<String,String> paraMap = new HashMap<>();
+            paraMap.put("companyName", request.getCompanyName());
+            paraMap.put("content", contentText);
+            paraMap.put("question", question);
+            //用pmpAigc非流接口集合bean 前组装数据 用线程执行
+            PmpAigcBean pmpAigcBean = new PmpAigcBean();
+            pmpAigcBean.setReidskey(reidskey);
+            pmpAigcBean.setDocId(docBean.getDocId());
+            pmpAigcBean.setDocName(docBean.getDocName());
+            pmpAigcBean.setTitle(docBean.getTitle());
+            pmpAigcBean.setPromptId(promptId);
+            pmpAigcBean.setParaMap(paraMap);
+            pmpAigcBean.setEventStreamFlg(true);
+            pmpAigcBean.setTaskId(docBean.getTaskId());
+            pmpAigcBean.setWindCode(docBean.getWindCode());
+            pmpAigcBean.setNodeType(request.getNodeType());
+            pmpAigcBeanList.add(pmpAigcBean);
+        }
+
+        if(request.isSelfDocFlg() && pmpAigcBeanList.size() > 0){
+            //是否N+1 自有文档 固定值  P045503
+            PmpAigcBean pmpAigcBean1 = new PmpAigcBean();
+            String md5 = pmpAigcBeanList.get(0).getWindCode() + request.getCompanyName();
+            pmpAigcBean1.setDocId(MD5Util.encrypt32(md5));
+            pmpAigcBean1.setDocName(request.getCompanyName()+ "-自有文档");
+            pmpAigcBean1.setTitle(request.getCompanyName()+ "-自有文档");
+            pmpAigcBean1.setPromptId(Constants.PromptId.PromptId_1_P045503);
+            Map<String,String> paraMap1 = new HashMap<>();
+            paraMap1.put("companyName", request.getCompanyName());
+            pmpAigcBean1.setParaMap(paraMap1);
+            pmpAigcBean1.setEventStreamFlg(true);
+            pmpAigcBean1.setWindCode(pmpAigcBeanList.get(0).getWindCode());
+            pmpAigcBean1.setNodeType(request.getNodeType());
+            String reidskey1 = "Wind.Stock.AIresearch.Framework" + String.format(".AIResearchService.aigcFramework.isNpromptIdFlg::%s", MD5Util.encrypt32(JSON.toJSONString(pmpAigcBean1)));
+            pmpAigcBean1.setReidskey(reidskey1);
+            pmpAigcBeanList.add(pmpAigcBean1);
+        }
+
+        //start 线程
+        if (pmpAigcBeanList.size() > 0) {
+            ExecutorService executorService = new ThreadPoolExecutor(pmpAigcBeanList.size(), pmpAigcBeanList.size(), 0, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>());
+            List<Callable<Object>> tasks = new LinkedList<>();
+            try {
+                for (PmpAigcBean pmpAigcBean: pmpAigcBeanList) {
+                    AiGcBaseRequest baseRequest = new AiGcBaseRequest();
+                    baseRequest.setDocId(pmpAigcBean.getDocId());
+                    baseRequest.setWindCode(pmpAigcBean.getWindCode());
+                    baseRequest.setPromptId(pmpAigcBean.getPromptId());
+                    baseRequest.setNodeType(pmpAigcBean.getNodeType());
+                    String mongoValue = mongoDBService.findMongoAiGcBase(baseRequest);
+                    if (StringUtils.isNotEmpty(mongoValue)) {
+                        resultTxtList.add(mongoValue);
+                    }else{
+                        Map<String, String> copyOfContextMap = MDC.getCopyOfContextMap();
+                        UserBean userBean = InjectVariable.getThreadLocal();
+                        log.info("AIResearchService.pmpAigcNoStreamThread docName:{}", pmpAigcBean.getDocName());
+                        tasks.add(() -> {
+                            try {
+                                MDC.setContextMap(copyOfContextMap);
+                                InjectVariable.setThreadLocal(userBean);
+                                aliceAigcAnswerHttpClient.pmpAigcNoStreamThread(resultTxtList, pmpAigcBean);
+                                return null;
+                            } catch (Exception e) {
+                                throw new RuntimeException(e);
+                            } finally {
+                                MDC.clear();
+                                InjectVariable.removeThreadLocal();
+                            }
+                        });
+                    }
+                }
+                executorService.invokeAll(tasks, 120, TimeUnit.SECONDS);
+            } catch (Exception e) {
+                log.error("AIResearchService.executorService:", e);
+            } finally {
+                // 关闭线程池 并等待所有任务完成
+                executorService.shutdown();
+            }
+            //判断线程是否执行完毕
+            boolean isTerminated = executorService.isTerminated();
+            log.info("AIResearchService.isTerminated:{}, resultTxtList.size()={}", isTerminated, resultTxtList.size());
+        }
+        //end
+
+        //内容合并
+        for (String result: resultTxtList) {
+            resultList.append("\n\n").append(result);
+        }
+
+        if(StringUtils.isEmpty(resultList.toString())){
+            return null;
+        }
+
+        //执行AIGC文档列表 //勾选的文档ID，过滤向量失败的文档ID
+        List<DocListBean> docListBeanList = new ArrayList<>();
+        if (resultTxtList.size() > 0) {
+            //start  单个文档AIGC内容存 MongoDB 预先执行AIGC
+            for (PmpAigcBean pmpAigcBean: pmpAigcBeanList) {
+                //缓存数据
+                String reidsvalue = redisManager.get(pmpAigcBean.getReidskey());
+                if (StringUtils.isNotEmpty(reidsvalue)) {
+                    AiGcBaseRequest temp = new AiGcBaseRequest();
+                    temp.setDocId(pmpAigcBean.getDocId());
+                    temp.setWindCode(pmpAigcBean.getWindCode());
+                    temp.setPromptId(pmpAigcBean.getPromptId());
+                    temp.setText(reidsvalue);
+                    temp.setNodeType(pmpAigcBean.getNodeType());
+                    temp.setCreator("system");
+                    mongoDBService.insertMongoAiGcBase(temp);
+                }
+
+                DocListBean docListBean = new DocListBean();
+                docListBean.setFrameworkDocId(pmpAigcBean.getDocId());
+                docListBean.setFrameworkDocName(pmpAigcBean.getDocName());
+                docListBeanList.add(docListBean);
+            }
+            //end
+        }
+        //end
+
+        //股票代码 查找行业，映射枚举值
+        String industryType = "";
+        String framework = "";
+        if(request.getNodeType().equals(Constants.NodeType.ONE)){
+            String windCode = request.getDocBean().get(0).getWindCode();
+            String userId = config.getProperty("data.framework.userId", "6938791");
+            List<String> industryTypeList = teamIntroduceService.getIndustryType(windCode, Long.valueOf(userId));
+            log.info("industryTypeList:{}", JSONObject.toJSON(industryTypeList));
+            if(!CollectionUtils.isEmpty(industryTypeList)){
+                industryType = industryTypeList.get(0);
+                framework = MapEnumConstant.industryTypeMap.get(industryType);
+            }
+            log.info("windCode:{}, industryType:{}, framework:{}", windCode, industryType, framework);
+        }
+
+        //3、合并AIGC内容，再次调用AIGC非流接口
+        String promptId = request.getPromptId();
+        String companyName = request.getCompanyName();
+        String content = resultList.toString();
+
+        HashMap promptParams = new HashMap();
+        if (StringUtils.isNotBlank(companyName)) {
+            promptParams.put("companyName", companyName);
+        }
+        if (StringUtils.isNotBlank(question)) {
+            promptParams.put("question", question);
+        }
+        if (StringUtils.isNotBlank(content)) {
+            promptParams.put("content", content);
+        }
+        if (StringUtils.isNotBlank(framework)) {
+            promptParams.put("framework", framework);
+        }
+        String answer = aliceAigcAnswerHttpClient.pmpAigcNoStreamNew(promptParams, promptId);
+
+        AiGcPreprocRequest preprocRequest = new AiGcPreprocRequest();
+        preprocRequest.setWindCode(request.getDocBean().get(0).getWindCode());
+        preprocRequest.setNodeType(request.getNodeType());
+        preprocRequest.setPromptId(request.getPromptId());
+        preprocRequest.setText(answer.toString());
+        preprocRequest.setDocListBean(docListBeanList);
+        preprocRequest.setMd5(request.getMd5());
+        this.saveHangTree(preprocRequest);
+
+        return answer;
+    }
+
+    /**
+     * AI投研框架->挂树 AIGC
+     * @param request
+     * @return
+     */
+    public StreamChatResponse hangTreeAigc(AiHangTreeRequest request) {
+        //3、合并AIGC内容，再次调用AIGC流接口
+        String contentText = request.getFrameworkText() + "/n/n" + request.getBreakDownText();
+        boolean isWindModel = request.isWindModel();
+        String promptId = request.getPromptId();
+        String companyName = request.getCompanyName();
+        StreamChatResponse streamChatResponse = aliceAigcAnswerHttpClient.aigcResearchInfo("", promptId, companyName, contentText, "", "");
+        return streamChatResponse;
+    }
+
+    /**
+     * AI投研框架->聚合 AIGC 非流输出
+     * @param request
+     * @return
+     */
+    public String hangTreeAigcNoStream_back(AiHangTreeRequest request) {
+        AiGcPreprocRequest preprocRequest = new AiGcPreprocRequest();
+        preprocRequest.setWindCode(request.getWindCode());
+        preprocRequest.setNodeType(request.getNodeType());
+        preprocRequest.setPromptId(request.getPromptId());
+        // 排序
+        List<DocListBean> sortedList = request.getDocListBean().stream().filter(bean -> bean.getFrameworkDocId() != null).sorted(Comparator.comparing(DocListBean::getFrameworkDocId)).collect(Collectors.toList());
+        String md5 = MD5Util.encrypt32(JSON.toJSONString(sortedList));
+
+        AiGcPreprocRequest yzRequest = new AiGcPreprocRequest();
+        yzRequest.setMd5(md5);
+        yzRequest.setWindCode(request.getWindCode());
+        yzRequest.setNodeType(request.getNodeType());
+        String answerMG = this.getHangTreeText(yzRequest);
+        if(StringUtils.isNotEmpty(answerMG)){
+            return answerMG;
+        }
+
+        //3、合并AIGC内容，再次调用AIGC流接口
+        String contentText = request.getFrameworkText() + "/n/n" + request.getBreakDownText();
+        String promptId = request.getPromptId();
+        String companyName = request.getCompanyName();
+
+        HashMap promptParams = new HashMap();
+        if (companyName != null) {
+            promptParams.put("companyName", companyName);
+        }
+        if (contentText != null) {
+            promptParams.put("content", contentText);
+        }
+        String answer = aliceAigcAnswerHttpClient.pmpAigcNoStreamNew(promptParams, promptId);
+
+        if (StringUtils.isNotEmpty(answer)) {
+            answer = this.hangTreeAigcNoStreamInd(request, answer);
+
+            preprocRequest.setText(answer);
+            preprocRequest.setMd5(md5);
+            this.saveHangTree(preprocRequest);
+        }
+        return answer;
+    }
+
+    public String hangTreeAigcNoStreamInd(AiHangTreeRequest request, String answer) {
+        if (StringUtils.isEmpty(answer)) {
+            return answer;
+        }
+        AiGcPreprocRequest preprocRequest = new AiGcPreprocRequest();
+        preprocRequest.setWindCode(request.getWindCode());
+        preprocRequest.setNodeType(Constants.NodeType.FOUR);
+        preprocRequest.setPromptId("P050620");
+        String contentText = mongoDBService.findMongoPreproc(preprocRequest);
+        if (StringUtils.isEmpty(contentText)) {
+            return answer;
+        }
+        String promptId = preprocRequest.getPromptId();
+        String companyName = request.getCompanyName();
+        HashMap promptParams = new HashMap();
+        if (companyName != null) {
+            promptParams.put("companyName", companyName);
+        }
+        if (contentText != null) {
+            promptParams.put("content", contentText);
+        }
+        String answerInd = aliceAigcAnswerHttpClient.pmpAigcNoStreamNew(promptParams, promptId);
+        return answerInd;
+    }
+
+    public String hangTreeAigcNoStream(AiHangTreeRequest request) {
+        //3、合并AIGC内容，再次调用AIGC流接口
+        if (StringUtils.isEmpty(request.getWindCode())) {
+            return "";
+        }
+        request.setNodeType(StringUtils.isEmpty(request.getNodeType()) ? Constants.NodeType.THREE : request.getNodeType());
+
+        //获取框架信息
+        AiGcPreprocRequest request1 = new AiGcPreprocRequest();
+        request1.setWindCode(request.getWindCode());
+        request1.setNodeType(Constants.NodeType.ONE);
+        request1.setPromptId(Constants.PromptId.PromptId_1_P042256);
+        List<AiGcPreprocEntity> list = mongoDBService.findMongoPreprocList(request1);
+        if (CollectionUtils.isEmpty(list)) {
+            return "";
+        }
+        list.sort(Comparator.comparing(o -> o.getNodeOrder()));
+        StringBuffer buffer = new StringBuffer();
+        for (int i = 0; i < list.size(); i++) {
+            AiGcPreprocEntity entity = list.get(i);
+            if(entity.getNodeLevel() <= 1){
+                buffer.append("\n").append(entity.getNodeText()).append("\n");
+            }else{
+                buffer.append(entity.getNodeText()).append("\n");
+            }
+        }
+        String frameworkText = buffer.toString();
+        request.setFrameworkText(frameworkText);
+
+        //获取拆解信息
+        AiGcPreprocRequest request2 = new AiGcPreprocRequest();
+        request2.setWindCode(request.getWindCode());
+        request2.setNodeType(Constants.NodeType.TWO);
+        request2.setPromptId(Constants.PromptId.PromptId_2_P042254);
+        String breakDownText = mongoDBService.findMongoPreproc(request2);
+        request.setBreakDownText(breakDownText);
+        if (StringUtils.isEmpty(breakDownText)) {
+            return "";
+        }
+
+        //获取指标信息
+        AiGcPreprocRequest request4 = new AiGcPreprocRequest();
+        request4.setWindCode(request.getWindCode());
+        request4.setNodeType(Constants.NodeType.FOUR);
+        request4.setPromptId(Constants.PromptId.PromptId_4_P050620);
+        String answerInd = mongoDBService.findMongoPreproc(request4);
+
+        // 排序
+        List<DocListBean> sortedList = list.get(0).getDocListBean().stream().filter(bean -> bean.getFrameworkDocId() != null).sorted(Comparator.comparing(DocListBean::getFrameworkDocId)).collect(Collectors.toList());
+        // 排序
+        String md5 = MD5Util.encrypt32(JSON.toJSONString(sortedList));
+        if(StringUtils.isNotEmpty(answerInd)){
+            md5 = MD5Util.encrypt32(JSON.toJSONString(sortedList + answerInd));
+        }
+        AiGcPreprocRequest yzRequest = new AiGcPreprocRequest();
+        yzRequest.setMd5(md5);
+        yzRequest.setWindCode(request.getWindCode());
+        yzRequest.setNodeType(request.getNodeType());
+        String answerMG = this.getHangTreeText(yzRequest);
+        if(StringUtils.isNotEmpty(answerMG)){
+            return answerMG;
+        }
+
+        //聚合
+        String contentText = request.getFrameworkText() + "/n/n" + request.getBreakDownText();
+        //"P042255";
+        String promptId = request.getPromptId();
+        String companyName = request.getCompanyName();
+
+        HashMap promptParams = new HashMap();
+        if (companyName != null) {
+            promptParams.put("companyName", companyName);
+        }
+        if (contentText != null) {
+            promptParams.put("content", contentText);
+        }
+        String answer = aliceAigcAnswerHttpClient.pmpAigcNoStreamNew(promptParams, promptId);
+
+        if (StringUtils.isNotEmpty(answerInd)) {
+            answer = this.hangTreeAigcNoStreamInd(request, answer);
+
+            AiGcPreprocRequest preprocRequest = new AiGcPreprocRequest();
+            preprocRequest.setWindCode(request.getWindCode());
+            preprocRequest.setNodeType(request.getNodeType());
+            preprocRequest.setPromptId(promptId);
+            preprocRequest.setDocListBean(sortedList);
+            preprocRequest.setText(answer);
+            preprocRequest.setMd5(md5);
+            this.saveHangTree(preprocRequest);
+        }
+        return answer;
+
+    }
+
+
+    /**
+     * 查询文档元信息
+     * @param bean
+     * @return
+     */
+    public JSONObject getPDF(AliceRequestBean bean) {
+        JSONObject metaInformation = null;
+        // 查Ocean
+        try {
+            //1、 Ocean 查询文档元信息
+            PdfSearchRequestBean pdfRequestBean = new PdfSearchRequestBean();
+            pdfRequestBean.setDocType(Integer.valueOf(bean.getDocType()));
+            pdfRequestBean.setDocId(bean.getDocId());
+            // 获取或设置URL
+            pdfRequestBean.setGfsPath(bean.getUrl());
+            // 查询文档元信息
+            metaInformation = this.querySearchInfo(pdfRequestBean).getQueriedData();
+            if (metaInformation != null) {
+                log.info("check Ocean加工数据查询成功 {}", bean.getDocId());
+                return metaInformation;
+            } else {
+                log.info("check Ocean加工数据查询数据缺失 {}", bean.getDocId());
+            }
+        } catch (Exception e) {
+            log.warn("check Ocean加工数据查询失败 {} {}", bean.getDocId(), ExceptionUtils.stacktraceToString(e, 5));
+        }
+        return null;
+    }
+
+    //todo yangxw方法切出来的
+    public PdfQueriedDataBean<JSONObject> querySearchInfo(PdfSearchRequestBean bean) {
+
+        PdfOceanRequestBean requestCommonInfo = BeanConverter.pdfRequestBeanToPdfOceanParameter(bean);
+        PdfOceanResponseBean query = pdfOceanExpoClient.query(requestCommonInfo);
+        String subsidiary = GzipUtils.decompress(query.getDocs()[0].getSubsidiary());
+        JSONObject subsidiaryJsonObject = JSONObject.parseObject(subsidiary);
+        log.info("querySearchInfo.subsidiaryJsonObject:{}", subsidiaryJsonObject);
+        return new PdfQueriedDataBean<>(subsidiaryJsonObject.getJSONObject("searchInfo"));
+    }
+
+    /**
+     * 解析PDF文档内容，并分页切分 35kb内容
+     * @param jsonPdfBean
+     * @return
+     */
+    public List<String> analysisBreakPDF(JSONObject jsonPdfBean, String pagesizeSplit) {
+        List<String> resultList = new ArrayList<>();
+        //解析文档元信息
+        PdfBean.Pesponse pdfBeanResponse = JSONObject.toJavaObject(jsonPdfBean, PdfBean.Pesponse.class);
+        if (pdfBeanResponse != null) {
+            Long total = pdfBeanResponse.getTotal();
+            if (total > 30 && total <= 50) {
+                total = total/2;
+            } else if (total > 50) {
+                total = 25L;
+            }
+            if(StringUtils.isNotBlank(pagesizeSplit)){
+                total = Long.valueOf(pagesizeSplit);
+            }
+            log.info("total:{}, pagesizeSplit:{}" , total, pagesizeSplit);
+            StringBuffer txtAppend = new StringBuffer("\n");
+            List<PdfBean.Pesponse.Pages> pagesList = pdfBeanResponse.getPages();
+            int count = 0;
+            for (PdfBean.Pesponse.Pages pages: pagesList) {
+                count++;
+                StringBuffer paragraphAppend = new StringBuffer("\n");
+                List<PdfBean.Pesponse.Pages.Paragraphs> paragraphs = pages.getParagraphs();
+                for (PdfBean.Pesponse.Pages.Paragraphs paragraph: paragraphs) {
+                    if (paragraph.getText().contains("资料来源") || paragraph.getText().contains("注：")) {
+                    } else {
+                        paragraphAppend.append(paragraph.getText()).append("\n");
+                    }
+                }
+
+                StringBuffer tableAppend = new StringBuffer();
+                List<PdfBean.Pesponse.Pages.Table> tables = pages.getTables();
+                for (PdfBean.Pesponse.Pages.Table table: tables) {
+                    List<List<PDFcells>> cells = table.getCells();
+                    tableAppend.append(table.getTitle()).append("\n");
+                    for (int i = 0; i < cells.size(); i++) {
+                        tableAppend.append("|");
+                        List<PDFcells> fcellsList = cells.get(i);
+                        for (PDFcells pdFcells: fcellsList) {
+                            tableAppend.append(pdFcells.getText()).append("|");
+                        }
+                        tableAppend.append("\n");
+                    }
+
+                }
+                if(count > total){
+                    log.info("count：{},txtAppend：{}", count, txtAppend.toString());
+                    resultList.add(txtAppend.toString());
+                    count = 0;
+                    txtAppend = new StringBuffer("\n");
+                }
+                txtAppend.append(tableAppend).append(paragraphAppend);
+            }
+            log.info("total：{},txtAppend：{}", total, txtAppend.toString());
+            resultList.add(txtAppend.toString());
+        }
+        return resultList;
+    }
+
+    /**
+     * AI投研框架->查询并解析文档元信息
+     * @param request
+     * @return
+     */
+    public Map<String, Object> getPDFanalysisPDF(AiResearchRequest request) {
+        Map<String, Object> resultMap = new HashMap<>();
+        resultMap.put("txtAppend", "");
+
+        List<DocBean> paramsList = request.getDocBean();
+        for (int i = 0; i < paramsList.size(); i++) {
+            DocBean docBean = paramsList.get(i);
+            AliceRequestBean bean = new AliceRequestBean();
+            bean.setDocName(docBean.getDocName());
+            bean.setDocId(docBean.getDocId());
+            bean.setDocSource(Constants.DocSource.ONE);
+            bean.setUrl(docBean.getUrl());
+            bean.setDocType(request.getDocType());
+            //查询文档元信息
+            JSONObject jsonBean = this.getPDF(bean);
+            if(jsonBean==null){
+                continue;
+            }
+            //解析文档元信息
+            PdfBean.Pesponse pdfBeanResponse = JSONObject.toJavaObject(jsonBean, PdfBean.Pesponse.class);
+            if(pdfBeanResponse != null){
+                StringBuffer txtAppend = new StringBuffer("\n");
+                List<PdfBean.Pesponse.Pages> pagesList = pdfBeanResponse.getPages();
+                for (PdfBean.Pesponse.Pages pages: pagesList) {
+                    StringBuffer paragraphAppend = new StringBuffer("\n");
+                    List<PdfBean.Pesponse.Pages.Paragraphs> paragraphs = pages.getParagraphs();
+                    for (PdfBean.Pesponse.Pages.Paragraphs paragraph: paragraphs) {
+                        if (paragraph.getText().contains("资料来源") || paragraph.getText().contains("注：")) {
+                        } else {
+                            paragraphAppend.append(paragraph.getText()).append("\n");
+                        }
+                    }
+
+                    StringBuffer tableAppend = new StringBuffer();
+                    List<PdfBean.Pesponse.Pages.Table> tables = pages.getTables();
+                    for (PdfBean.Pesponse.Pages.Table table: tables) {
+                        List<List<PDFcells>> cells = table.getCells();
+                        tableAppend.append(table.getTitle()).append("\n");
+                        for (int k = 0; k < cells.size(); k++) {
+                            tableAppend.append("|");
+                            List<PDFcells> fcellsList = cells.get(k);
+                            for (PDFcells pdFcells: fcellsList) {
+                                tableAppend.append(pdFcells.getText()).append("|");
+                            }
+                            tableAppend.append("\n");
+                        }
+
+                    }
+                    txtAppend.append(tableAppend).append(paragraphAppend);
+                }
+                log.info("txtAppend=" + txtAppend.toString());
+                resultMap.put(docBean.getDocId(), txtAppend.toString());
+            }
+        }
+        return resultMap;
+    }
+
+    /**
+     * AI投研框架->解析文档元信息
+     * @param request
+     * @return
+     */
+    public List<String> analysisPDF(PdfBean request) {
+        List<String> resultList = new ArrayList<>();
+        if (request.getStatus().equals("success")) {
+            PdfBean.Pesponse response = request.getResponse();
+            PdfBean.Pesponse responseNew = new PdfBean.Pesponse();
+            BeanUtils.copyProperties(response, responseNew);
+            JSONObject jsonPdfBean = JSONObject.parseObject(JSONObject.toJSONString(responseNew));
+            //解析文档元信息
+            PdfBean.Pesponse pdfBeanResponse = JSONObject.toJavaObject(jsonPdfBean, PdfBean.Pesponse.class);
+            if (pdfBeanResponse != null) {
+                Long total = pdfBeanResponse.getTotal();
+                if (total > 30 && total <= 50) {
+                    total = total/2;
+                } else if (total > 50) {
+                    total = 25L;
+                }
+                StringBuffer txtAppend = new StringBuffer("\n");
+                List<PdfBean.Pesponse.Pages> pagesList = pdfBeanResponse.getPages();
+                int count = 0;
+                for (PdfBean.Pesponse.Pages pages: pagesList) {
+                    count++;
+                    StringBuffer paragraphAppend = new StringBuffer("\n");
+                    List<PdfBean.Pesponse.Pages.Paragraphs> paragraphs = pages.getParagraphs();
+                    for (PdfBean.Pesponse.Pages.Paragraphs paragraph: paragraphs) {
+                        if (paragraph.getText().contains("资料来源") || paragraph.getText().contains("注：")) {
+                        } else {
+                            paragraphAppend.append(paragraph.getText()).append("\n");
+                        }
+                    }
+
+                    StringBuffer tableAppend = new StringBuffer();
+                    List<PdfBean.Pesponse.Pages.Table> tables = pages.getTables();
+                    for (PdfBean.Pesponse.Pages.Table table: tables) {
+                        List<List<PDFcells>> cells = table.getCells();
+                        tableAppend.append(table.getTitle()).append("\n");
+                        for (int i = 0; i < cells.size(); i++) {
+                            tableAppend.append("|");
+                            List<PDFcells> fcellsList = cells.get(i);
+                            for (PDFcells pdFcells: fcellsList) {
+                                tableAppend.append(pdFcells.getText()).append("|");
+                            }
+                            tableAppend.append("\n");
+                        }
+
+                    }
+                    if(count > total){
+                        log.info("txtAppend=" + txtAppend.toString());
+                        resultList.add(txtAppend.toString());
+                        count = 0;
+                        txtAppend = new StringBuffer("\n");
+                    }
+                    txtAppend.append(tableAppend).append(paragraphAppend);
+                }
+                log.info("txtAppend=" + txtAppend.toString());
+                resultList.add(txtAppend.toString());
+            }
+        }
+        return resultList;
+    }
+
+    /**
+     * AI投研框架->清理缓存
+     * @param request
+     * @return
+     */
+    public Map<String, Object> cleanMongo(AiGcBaseRequest request) {
+        Map<String, Object> resultMap = new HashMap<>();
+        long deletedAiGcBase = mongoDBService.removeMongoAiGcBase(request);
+        resultMap.put("deletedAiGcBase", request.getWindCode() + ": " + deletedAiGcBase);
+        String reidskey = "Wind.Stock.AIresearch.Framework" + String.format(".cleanCache::%s", request.getWindCode());
+        resultMap.put(reidskey, request.getWindCode());
+        return resultMap;
+    }
+
+    /**
+     * AI投研框架->清理缓存
+     * @param request
+     * @return
+     */
+    public Map<String, Object> cleanALL(AiGcBaseRequest request) {
+        Map<String, Object> resultMap = new HashMap<>();
+        if(request.getNodeType().equals("1") && request.getTaskStatus() != null){
+            AiGcTaskEntity baseRequest = new AiGcTaskEntity();
+            baseRequest.setWindCode(request.getWindCode());
+            baseRequest.setPromptId(request.getPromptId());
+            baseRequest.setTaskStatus(request.getTaskStatus());
+            long deletedAiGcTask = mongoDBService.removeMongoAiGcTask(baseRequest);
+            resultMap.put("deletedAiGcTask", request.getWindCode() + ": " + deletedAiGcTask);
+            log.info("deletedAiGcTask", request.getWindCode() + ": " + deletedAiGcTask);
+        }
+
+        if(request.getNodeType().equals("2") && request.getTaskStatus() != null){
+            long deletedAiGcBase = mongoDBService.removeMongoAiGcBase(request);
+            resultMap.put("deletedAiGcBase", request.getWindCode() + ": " + deletedAiGcBase);
+            log.info("deletedAiGcBase", request.getWindCode() + ": " + deletedAiGcBase);
+        }
+
+        if(request.getNodeType().equals("3")){
+            AiGcPreprocRequest preprocRequest = new AiGcPreprocRequest();
+            preprocRequest.setWindCode(request.getWindCode());
+            preprocRequest.setPromptId(request.getPromptId());
+            long deletedPreproc = mongoDBService.removeMongoPreproc(preprocRequest);
+            resultMap.put("deletedPreproc", request.getWindCode() + ": " + deletedPreproc);
+            log.info("deletedPreproc", request.getWindCode() + ": " + deletedPreproc);
+        }
+
+        if(request.getNodeType().equals("4")){
+            AiGcReleaseRequest releaseRequest = new AiGcReleaseRequest();
+            releaseRequest.setWindCode(request.getWindCode());
+            releaseRequest.setPromptId(request.getPromptId());
+            long deletedAiGcRelease = mongoDBService.removeMongoAiGcRelease(releaseRequest);
+            resultMap.put("deletedAiGcRelease", request.getWindCode() + ": " + deletedAiGcRelease);
+            log.info("deletedAiGcRelease", request.getWindCode() + ": " + deletedAiGcRelease);
+        }
+
+        /*if(request.getNodeType().equals("5")){
+            ResearchReportEntity releaseRequest = new ResearchReportEntity();
+            releaseRequest.setWindCode(request.getWindCode());
+            long ResearchReport = mongoDBService.removeResearchReport(releaseRequest);
+            resultMap.put("ResearchReport", request.getWindCode() + ": " + ResearchReport);
+            log.info("ResearchReport", request.getWindCode() + ": " + ResearchReport);
+        }*/
+
+        if(request.getNodeType().equals("6")){
+            redisManager.set(TaskAIresearchJob.taskBaseAigcJobKey, "0");
+            redisManager.set(TaskAIresearchJob.taskBaseAigcJobKey4, "0");
+            redisManager.set(TaskAIresearchJob.taskHangTreeAigcJob, "0");
+        }
+        return resultMap;
+    }
+
+    /**
+     * AI投研框架->清理缓存
+     * @param request
+     * @return
+     */
+    public Map<String, Object> cleanTask(AiGcBaseRequest request) {
+        Map<String, Object> resultMap = new HashMap<>();
+        AiGcTaskEntity baseRequest = new AiGcTaskEntity();
+        baseRequest.setWindCode(request.getWindCode());
+        baseRequest.setTaskStatus(request.getTaskStatus());
+        long deletedCount = mongoDBService.removeMongoAiGcTask(baseRequest);
+        resultMap.put("deletedCount", request.getWindCode() + ": " + deletedCount);
+        log.info("deletedCount", request.getWindCode() + ": " + deletedCount);
+        return resultMap;
+    }
+
+    /**
+     * AI投研框架 -> 验证 windCode 是否已清缓存
+     * @param windCode
+     * @return
+     */
+    public Boolean cleanCacheFlag(String windCode) {
+        Boolean flag = false;
+        String reidskey = "Wind.Stock.AIresearch.Framework" + String.format(".cleanCache::%s", windCode);
+        String reidsvalue = redisManager.get(reidskey);
+        if (StringUtils.isNotBlank(reidsvalue)) {
+            flag = true;
+        }
+        return flag;
+    }
+
+    /**
+     * AI投研框架 -> 验证 windCode 是否已清缓存
+     * @param windCode
+     * @return
+     */
+    public Boolean cleanCache(String windCode) {
+        String reidskey = "Wind.Stock.AIresearch.Framework" + String.format(".cleanCache::%s", windCode);
+        Boolean flag = redisManager.delete(reidskey);
+        return flag;
+    }
+
+    /**
+     * AI投研框架->
+     * @param request
+     * @return
+     */
+    public void saveHangTree(AiGcPreprocRequest request) {
+        mongoDBService.insertMongoPreproc(request);
+    }
+
+    /**
+     * AI投研框架->预发布数据，执行发布
+     * @param request
+     * @return
+     */
+    public void publishRelease(AiGcPreprocRequest request) {
+        List<AiGcPreprocEntity> preList = mongoDBService.findMongoPreprocList(request);
+        if(CollectionUtils.isEmpty(preList)){
+            return;
+        }
+
+        Date createTime = new Date();
+        SimpleDateFormat sdft = new SimpleDateFormat("yyyyMMddHHmmss");
+        String publishDate = sdft.format(createTime);
+        SimpleDateFormat sdf = new SimpleDateFormat("yyyy.MM");
+        String version = sdf.format(createTime);
+        String publishVersion = "V1." + version;
+
+        //查询版本表 是否有数据，设置版本递增
+        AiGcReleaseVersionEntity versionEntity = new AiGcReleaseVersionEntity();
+        versionEntity.setWindCode(request.getWindCode());
+        versionEntity.setNodeType(request.getNodeType());
+        versionEntity.setPromptId(request.getPromptId());
+        versionEntity.setVersion(version);
+        List<AiGcReleaseVersionEntity> releaseList = mongoDBService.findReleaseVersionList(versionEntity);
+        if(!CollectionUtils.isEmpty(releaseList)){
+            long size = releaseList.size() + 1;
+            publishVersion = "V" + size + "." + version;
+        }
+
+        //发布版本表，存最新发版
+        List<AiGcReleaseEntity> releaseEntityList = new ArrayList<>();
+        for (AiGcPreprocEntity preBean: preList) {
+            AiGcReleaseEntity releaseEntity = new AiGcReleaseEntity();
+            BeanUtils.copyProperties(preBean, releaseEntity);
+            releaseEntity.setPublishVersion(publishVersion);
+            releaseEntity.setPublishDate(publishDate);
+            releaseEntity.setId(null);
+            releaseEntityList.add(releaseEntity);
+        }
+        mongoDBService.insertMongoRelease(releaseEntityList);
+
+        //版本历史
+        List<AiGcReleaseHistoryEntity> releaseHistoryList = new ArrayList<>();
+        for (AiGcReleaseEntity releaseBean: releaseEntityList) {
+            AiGcReleaseHistoryEntity releaseHistory = new AiGcReleaseHistoryEntity();
+            BeanUtils.copyProperties(releaseBean, releaseHistory);
+            releaseHistory.setVersion(version);
+            releaseHistory.setId(null);
+            releaseHistoryList.add(releaseHistory);
+        }
+        mongoDBService.insertReleaseHistory(releaseHistoryList);
+
+        //版本记录
+        versionEntity.setPublishVersion(publishVersion);
+        versionEntity.setPublishDate(publishDate);
+        versionEntity.setCreateTime(createTime);
+        mongoDBService.insertReleaseVersion(versionEntity);
+
+        //修改 研报列表 提供页面查询
+        ResearchOverview entity = new ResearchOverview();
+        entity.setWindCode(request.getWindCode());
+        List<ResearchOverview> reportList = mapper.selectByExample(entity);
+        if(!CollectionUtils.isEmpty(reportList)){
+            ResearchOverview update = new ResearchOverview();
+            update.setId(reportList.get(0).getId());
+            update.setWindCode(reportList.get(0).getWindCode());
+            update.setReportNumTask(preList.get(0).getDocListBean().size()-1);
+            if (reportList.get(0).getReportNum()==0) {
+                update.setReportNum(update.getReportNumTask());
+            }
+            if(request.getNodeType().equals(Constants.NodeType.ONE)){
+                update.setCreateBy("Framework");
+                update.setFrameworkStatus(Constants.OverviewStatus.TWO);
+                update.setFrameworkVersion(publishVersion);
+            }else if(request.getNodeType().equals(Constants.NodeType.TWO)){
+                update.setCreateBy("BreakDown");
+                update.setBreakDownStatus(Constants.OverviewStatus.TWO);
+                update.setBreakDownVersion(publishVersion);
+            }else if(request.getNodeType().equals(Constants.NodeType.THREE)){
+                update.setCreateBy("HangTree");
+                update.setHangTreeStatus(Constants.OverviewStatus.TWO);
+                update.setHangTreeVersion(publishVersion);
+            }else if(request.getNodeType().equals(Constants.NodeType.FOUR)){
+                update.setCreateBy("Ind");
+                update.setBreakDownStatus(Constants.OverviewStatus.TWO);
+                update.setBreakDownVersion(publishVersion);
+            }
+            update.setPublishVersion(publishVersion);
+
+            if(null != reportList.get(0).getNewDataStatus() && (reportList.get(0).getNewDataStatus().equals(Constants.NewDataStatus.ZERO))){
+                AiGcTaskEntity aiGcTaskEntity = new AiGcTaskEntity();
+                aiGcTaskEntity.setWindCode(request.getWindCode());
+                aiGcTaskEntity.setNodeType(request.getNodeType());
+                if(request.getNodeType().equals(Constants.NodeType.ONE)){
+                    aiGcTaskEntity.setPromptId(Constants.PromptId.PromptId_1_P042185);
+                }else if(request.getNodeType().equals(Constants.NodeType.TWO)){
+                    aiGcTaskEntity.setPromptId(Constants.PromptId.PromptId_2_P042848);
+                }
+                List<AiGcTaskEntity> list = mongoDBService.findMongoAiGcTaskList(aiGcTaskEntity);
+                if(!CollectionUtils.isEmpty(list)){
+                    update.setNewDataStatus(Constants.NewDataStatus.TWO);
+                }
+            }
+            mapper.updateByPrimaryKeySelective(update);
+            //mongoDBService.updateResearchReport(update);
+        }
+    }
+
+    /**
+     * 版本切换
+     * @param preList
+     * @param request
+     */
+    public void publishReleaseVersionChange(List<AiGcReleaseHistoryEntity> preList, AiGcPreprocRequest request) {
+        if(CollectionUtils.isEmpty(preList)){
+            return;
+        }
+
+        Date createTime = new Date();
+        SimpleDateFormat sdft = new SimpleDateFormat("yyyyMMddHHmmss");
+        String publishDate = sdft.format(createTime);
+        SimpleDateFormat sdf = new SimpleDateFormat("yyyy.MM");
+        String version = sdf.format(createTime);
+        String publishVersion = "V1." + version;
+
+        //查询版本表 是否有数据，设置版本递增
+        AiGcReleaseVersionEntity versionEntity = new AiGcReleaseVersionEntity();
+        versionEntity.setWindCode(request.getWindCode());
+        versionEntity.setNodeType(request.getNodeType());
+        versionEntity.setPromptId(request.getPromptId());
+        versionEntity.setVersion(version);
+        List<AiGcReleaseVersionEntity> releaseList = mongoDBService.findReleaseVersionList(versionEntity);
+        if(!CollectionUtils.isEmpty(releaseList)){
+            long size = releaseList.size() + 1;
+            publishVersion = "V" + size + "." + version;
+        }
+
+        //发布版本表，存最新发版
+        List<AiGcReleaseEntity> releaseEntityList = new ArrayList<>();
+        for (AiGcReleaseHistoryEntity preBean: preList) {
+            AiGcReleaseEntity releaseEntity = new AiGcReleaseEntity();
+            BeanUtils.copyProperties(preBean, releaseEntity);
+            releaseEntity.setPublishVersion(publishVersion);
+            releaseEntity.setPublishDate(publishDate);
+            releaseEntity.setId(null);
+            releaseEntityList.add(releaseEntity);
+        }
+        mongoDBService.insertMongoRelease(releaseEntityList);
+
+        //版本历史
+        List<AiGcReleaseHistoryEntity> releaseHistoryList = new ArrayList<>();
+        for (AiGcReleaseEntity releaseBean: releaseEntityList) {
+            AiGcReleaseHistoryEntity releaseHistory = new AiGcReleaseHistoryEntity();
+            BeanUtils.copyProperties(releaseBean, releaseHistory);
+            releaseHistory.setVersion(version);
+            releaseHistory.setId(null);
+            releaseHistoryList.add(releaseHistory);
+        }
+        mongoDBService.insertReleaseHistory(releaseHistoryList);
+
+        //版本记录
+        versionEntity.setPublishVersion(publishVersion);
+        versionEntity.setPublishDate(publishDate);
+        versionEntity.setCreateTime(createTime);
+        mongoDBService.insertReleaseVersion(versionEntity);
+
+        //修改 研报列表 提供页面查询
+        ResearchOverview entity = new ResearchOverview();
+        entity.setWindCode(request.getWindCode());
+        List<ResearchOverview> reportList = mapper.selectByExample(entity);
+        if(!CollectionUtils.isEmpty(reportList)){
+            ResearchOverview update = new ResearchOverview();
+            update.setId(reportList.get(0).getId());
+            update.setWindCode(reportList.get(0).getWindCode());
+            update.setReportNumTask(preList.get(0).getDocListBean().size());
+            if(request.getNodeType().equals(Constants.NodeType.ONE)){
+                update.setCreateBy("Framework");
+                update.setFrameworkStatus(2);
+                update.setFrameworkVersion(publishVersion);
+            }else if(request.getNodeType().equals(Constants.NodeType.TWO)){
+                update.setCreateBy("BreakDown");
+                update.setBreakDownStatus(2);
+                update.setBreakDownVersion(publishVersion);
+            }else if(request.getNodeType().equals(Constants.NodeType.THREE)){
+                update.setCreateBy("HangTree");
+                update.setHangTreeStatus(2);
+                update.setHangTreeVersion(publishVersion);
+            }
+            update.setPublishVersion(publishVersion);
+            mapper.updateByPrimaryKeySelective(update);
+            //mongoDBService.updateResearchReport(update);
+        }
+    }
+
+    /**
+     * AI投研框架->清理缓存
+     * @param request
+     * @return
+     */
+    public void saveBase(AiGcBaseRequest request) {
+        mongoDBService.insertMongoAiGcBase(request);
+    }
+
+    /**
+     * AI投研框架->清理缓存
+     * @param request
+     * @return
+     */
+    public void saveRelease(AiGcReleaseRequest request) {
+        mongoDBService.insertMongoRelease(request);
+    }
+
+    /**
+     * AI投研框架->查询预处理AIGC内容（挂树结果）
+     * @param request
+     * @return
+     */
+    public List<AiGcPreprocEntity> getHangTree(AiGcPreprocRequest request) {
+        List<AiGcPreprocEntity> list = mongoDBService.findMongoPreprocList(request);
+        if(StringUtils.isEmpty(request.getNodeText())){
+            return list;
+        }else{
+            //根据txt模糊查询节点 并显示所有子节点
+            //需求点，AIGC业务类型 (1:生成框架（第一级）, 2:拆解（第一级，第0级）, 3:挂树（第一级）)
+            List<AiGcPreprocEntity> resultList = new ArrayList<>();
+            if(request.getNodeType().equals(Constants.NodeType.TWO)){
+                List<AiGcPreprocEntity> regionList = list.stream().filter(item -> ((item.getNodeText().contains("## " + request.getNodeText()) || item.getNodeText().contains("### " + request.getNodeText()))
+                        && (item.getNodeLevel()==1 || item.getNodeLevel()==0))).collect(Collectors.toList());
+
+                this.getAiGcPreprocList(list, regionList, resultList);
+            }else if(request.getNodeType().equals(Constants.NodeType.ONE) || request.getNodeType().equals(Constants.NodeType.THREE)){
+                String nodeText = "## " + request.getNodeText();
+                List<AiGcPreprocEntity> regionList = list.stream().filter(item -> (item.getNodeText().contains(nodeText) && item.getNodeLevel()==1)).collect(Collectors.toList());
+                this.getAiGcPreprocList(list, regionList, resultList);
+            }
+            return resultList;
+        }
+    }
+
+    //迭代 递归数据
+    public List<AiGcPreprocEntity> getAiGcPreprocList(List<AiGcPreprocEntity> list, List<AiGcPreprocEntity> regionList, List<AiGcPreprocEntity> resultList) {
+        for (int i = 0; i < regionList.size(); i++) {
+            resultList.add(regionList.get(i));
+            String nodeId = regionList.get(i).getNodeId();
+            List<AiGcPreprocEntity> resultChiList = list.stream().filter(item -> item.getNodePId().equals(nodeId)).collect(Collectors.toList());
+            if (!CollectionUtils.isEmpty(resultChiList)) {
+                this.getAiGcPreprocList(list, resultChiList, resultList);
+            }
+        }
+        return resultList;
+    }
+
+    /**
+     * AI投研框架->查询预处理AIGC内容（挂树结果）
+     * @param request
+     * @return
+     */
+    public List<AiGcReleaseEntity> getAiGcReleaseTree(AiGcReleaseRequest request) {
+        List<AiGcReleaseEntity> list = mongoDBService.findMongoReleaseList(request);
+        if(StringUtils.isEmpty(request.getNodeText())){
+            return list;
+        }else{
+            //根据txt模糊查询节点 并显示所有子节点
+            //需求点，AIGC业务类型 (1:生成框架（第一级）, 2:拆解（第一级，第0级）, 3:挂树（第一级）)
+            List<AiGcReleaseEntity> resultList = new ArrayList<>();
+            if(request.getNodeType().equals(Constants.NodeType.TWO)){
+
+                List<AiGcReleaseEntity> regionList = list.stream().filter(item -> ((item.getNodeText().contains("## " + request.getNodeText()) || item.getNodeText().contains("### " + request.getNodeText()))
+                        && (item.getNodeLevel()==1 || item.getNodeLevel()==0))).collect(Collectors.toList());
+                this.getAiGcReleaseList(list, regionList, resultList);
+            }else if(request.getNodeType().equals(Constants.NodeType.ONE) || request.getNodeType().equals(Constants.NodeType.THREE)){
+
+                String nodeText = "## " + request.getNodeText();
+                List<AiGcReleaseEntity> regionList = list.stream().filter(item -> (item.getNodeText().contains(nodeText) && item.getNodeLevel()==1)).collect(Collectors.toList());
+                this.getAiGcReleaseList(list, regionList, resultList);
+            }
+            return resultList;
+        }
+    }
+
+    //迭代 递归数据
+    public List<AiGcReleaseEntity> getAiGcReleaseList(List<AiGcReleaseEntity> list, List<AiGcReleaseEntity> regionList, List<AiGcReleaseEntity> resultList) {
+        for (int i = 0; i < regionList.size(); i++) {
+            resultList.add(regionList.get(i));
+            String nodeId = regionList.get(i).getNodeId();
+            List<AiGcReleaseEntity> resultChiList = list.stream().filter(item -> item.getNodePId().equals(nodeId)).collect(Collectors.toList());
+            if (!CollectionUtils.isEmpty(resultChiList)) {
+                this.getAiGcReleaseList(list, resultChiList, resultList);
+            }
+        }
+        return resultList;
+    }
+
+    /**
+     * AI投研框架->查询预处理AIGC内容（挂树结果）
+     * @param request
+     * @return
+     */
+    public String findAiGcReleaseTree(AiGcReleaseRequest request) {
+        List<AiGcReleaseEntity> list = mongoDBService.findMongoReleaseList(request);
+        if(StringUtils.isEmpty(request.getNodeText())){
+
+            list.sort(Comparator.comparing(o -> o.getNodeOrder()));
+            StringBuffer buffer = new StringBuffer();
+            for (int i = 0; i < list.size(); i++) {
+                AiGcReleaseEntity entity = list.get(i);
+                if(entity.getNodeLevel() <= 1){
+                    buffer.append("\n").append(entity.getNodeText()).append("\n");
+                }else{
+                    buffer.append(entity.getNodeText()).append("\n");
+                }
+            }
+            return buffer.toString();
+        }else{
+            //根据txt模糊查询节点 并显示所有子节点
+            //需求点，AIGC业务类型 (1:生成框架（第一级）, 2:拆解（第一级，第0级）, 3:挂树（第一级）)
+            List<AiGcReleaseEntity> resultList = new ArrayList<>();
+            if(request.getNodeType().equals(Constants.NodeType.TWO)){
+
+                List<AiGcReleaseEntity> regionList = list.stream().filter(item -> ((item.getNodeText().contains("## " + request.getNodeText()) || item.getNodeText().contains("### " + request.getNodeText()))
+                        && (item.getNodeLevel()==1 || item.getNodeLevel()==0))).collect(Collectors.toList());
+                this.getAiGcReleaseList(list, regionList, resultList);
+            }else if(request.getNodeType().equals(Constants.NodeType.ONE) || request.getNodeType().equals(Constants.NodeType.THREE)){
+
+                String nodeText = "## " + request.getNodeText();
+                List<AiGcReleaseEntity> regionList = list.stream().filter(item -> (item.getNodeText().contains(nodeText) && item.getNodeLevel()==1)).collect(Collectors.toList());
+                this.getAiGcReleaseList(list, regionList, resultList);
+            }
+
+            resultList.sort(Comparator.comparing(o -> o.getNodeOrder()));
+            StringBuffer buffer = new StringBuffer();
+            for (int i = 0; i < resultList.size(); i++) {
+                AiGcReleaseEntity entity = resultList.get(i);
+                if(entity.getNodeLevel() <= 1){
+                    buffer.append("\n").append(entity.getNodeText()).append("\n");
+                }else{
+                    buffer.append(entity.getNodeText()).append("\n");
+                }
+            }
+            return buffer.toString();
+        }
+    }
+
+    /**
+     * AI投研框架->查询预处理AIGC内容（挂树结果）
+     * @param request
+     * @return
+     */
+    public String getHangTreeText(AiGcPreprocRequest request) {
+        String answer = mongoDBService.findMongoPreproc(request);
+        return answer;
+    }
+
+    /**
+     * AI投研框架-> 框架、拆解 AIGC结果-查询接口
+     * @param request
+     * @return
+     */
+    public List<AiGcBaseEntity> getMongAiGcBase(AiGcBaseRequest request) {
+        List<AiGcBaseEntity> list = mongoDBService.findMongoAiGcBaseList(request);
+        if(StringUtils.isEmpty(request.getText())){
+            return list;
+        }else{
+            //根据txt模糊查询节点 并显示所有子节点
+            //需求点，AIGC业务类型 (1:生成框架（第一级）, 2:拆解（第一级，第二级）, 3:挂树（第一级）)
+            List<AiGcBaseEntity> resultList = new ArrayList<>();
+            if(request.getNodeType().equals(Constants.NodeType.TWO)){
+                List<AiGcBaseEntity> regionList = list.stream().filter(item -> ((item.getNodeText().contains("## " + request.getText()) || item.getNodeText().contains("### " + request.getText()))
+                        && (item.getNodeLevel()==1 || item.getNodeLevel()==0))).collect(Collectors.toList());
+
+                this.getAiGcBaseList(list, regionList, resultList);
+            }else if(request.getNodeType().equals(Constants.NodeType.ONE) || request.getNodeType().equals(Constants.NodeType.THREE)){
+                String nodeText = "### " + request.getText();
+                List<AiGcBaseEntity> regionList = list.stream().filter(item -> (item.getNodeText().contains(nodeText) && item.getNodeLevel()==1)).collect(Collectors.toList());
+                this.getAiGcBaseList(list, regionList, resultList);
+            }
+            return resultList;
+        }
+    }
+
+    //迭代 递归数据
+    public List<AiGcBaseEntity> getAiGcBaseList(List<AiGcBaseEntity> list, List<AiGcBaseEntity> regionList, List<AiGcBaseEntity> resultList) {
+        for (int i = 0; i < regionList.size(); i++) {
+            resultList.add(regionList.get(i));
+            String nodeId = regionList.get(i).getNodeId();
+            List<AiGcBaseEntity> resultChiList = list.stream().filter(item -> item.getNodePId().equals(nodeId)).collect(Collectors.toList());
+            if (!CollectionUtils.isEmpty(resultChiList)) {
+                this.getAiGcBaseList(list, resultChiList, resultList);
+            }
+        }
+        return resultList;
+    }
+
+    /**
+     * AI投研框架-> 框架、拆解 AIGC预发布结果-查询接口
+     * @param request
+     * @return
+     */
+    public List<AiGcPreprocEntity> getMongAiGcPreproc(AiGcPreprocRequest request) {
+        List<AiGcPreprocEntity> list = mongoDBService.findMongoPreprocList(request);
+        return list;
+    }
+
+    /**
+     *  AI投研框架-> 框架、拆解 AIGC执行定时任务-查询接口
+     * @param request
+     * @return
+     */
+    public List<AiGcTaskEntity> getMongAiGcTask(AiGcTaskRequest request) {
+        AiGcTaskEntity beanRequest = new AiGcTaskEntity();
+        BeanUtils.copyProperties(request, beanRequest);
+        List<AiGcTaskEntity> list = mongoDBService.findMongoAiGcTaskList(beanRequest);
+        return list;
+    }
+
+    /**
+     *  AI投研框架-> 框架、拆解 AIGC执行定时任务-查询接口
+     * @param request
+     * @return
+     */
+    public PageResult<AiGcTaskEntity> findTaskByPage(AiGcTaskRequest request) {
+        AiGcTaskEntity beanRequest = new AiGcTaskEntity();
+        BeanUtils.copyProperties(request, beanRequest);
+        Date startTime = DateUtils.strToDate(request.getStartTime(), "yyyy-MM-dd HH:mm:ss");
+        Date endTime = DateUtils.strToDate(request.getEndTime(), "yyyy-MM-dd HH:mm:ss");
+        PageResult<AiGcTaskEntity> list = mongoDBService.findTaskByPage(beanRequest, request.getPageNo(), request.getPageSize(), startTime, endTime);
+        return list;
+    }
+
+    @BuryingLog(apiUrl = "/SmartReaderChatService/alice/getHangTreeForReader")
+    public List<AiGcPreprocEntity> getHangTreeForReader(AiGcPreprocRequest preRequest) {
+        List<AiGcPreprocEntity> aiGcPreprocEntities=new ArrayList<>();
+        if(config.getBooleanProperty("query.aiResearch.httpRequest",false)){
+            String result = httpProxyDecorator.post("https://exp.wind.com.cn/SmartReaderChatService/aireader/summary/airesearch/getAigcPreByType?_r=0.3424573742471573",JSON.toJSONString(preRequest));
+            JSONObject jsonObject = JSON.parseObject(result);
+            JSONArray jsonArray = jsonObject.getJSONArray("response");
+            if(jsonArray == null || jsonArray.size() == 0){
+                return  aiGcPreprocEntities;
+            }
+            for(Object object: jsonArray){
+                AiGcPreprocEntity aiGcPreprocEntity = JSONObject.parseObject(JSON.toJSONString(object),AiGcPreprocEntity.class);
+                aiGcPreprocEntities.add(aiGcPreprocEntity);
+            }
+            return aiGcPreprocEntities;
+        }
+        return this.getHangTree(preRequest);
+    }
+
+
+    //----------------------重新汇总------------------------------
+    /**
+     * AI投研框架->列表选项AIGC， 汇总用流输出
+     * @param request
+     * @return
+     */
+    public String aigcNoStreamRe(AiResearchReRequest request) {
+        log.info("aigcNoStreamRe: {}", JSONObject.toJSON(request));
+        if(CollectionUtils.isEmpty(request.getDocBean()) || StringUtils.isBlank(request.getNodeType())){
+            return null;
+        }
+
+        //请求报文唯一标识
+        List<PmpAigcBean> md5AigcBeanList = new ArrayList<>();
+        List<DocBean> md5paramsList = request.getDocBean();
+        for (int i = 0; i < md5paramsList.size(); i++) {
+            DocBean docBean = md5paramsList.get(i);
+            //验证是否有数据 start
+            AiGcBaseRequest baseRequest = new AiGcBaseRequest();
+            baseRequest.setDocId(docBean.getDocId());
+            baseRequest.setWindCode(docBean.getWindCode());
+            baseRequest.setNodeType(request.getNodeType());
+            //start 查询AI数据是否已经存在
+            if (request.getNodeType().equals(Constants.NodeType.ONE)) {
+                baseRequest.setPromptId(Constants.PromptId.PromptId_1_P042185);
+            } else if (request.getNodeType().equals(Constants.NodeType.TWO)) {
+                baseRequest.setPromptId(Constants.PromptId.PromptId_2_P042848);
+            }
+            List<AiGcBaseEntity> mongoValueList = mongoDBService.findMongoAiGcBaseList(baseRequest);
+            if (mongoValueList.size() == 0) {
+                continue;
+            }
+            //end
+            PmpAigcBean md5AigcBean = new PmpAigcBean();
+            md5AigcBean.setDocId(docBean.getDocId());
+            md5AigcBean.setDocName(docBean.getDocName());
+            md5AigcBean.setPromptId(docBean.getPromptId());
+            md5AigcBean.setWindCode(docBean.getWindCode());
+            md5AigcBean.setNodeType(request.getNodeType());
+            md5AigcBeanList.add(md5AigcBean);
+        }
+        // 排序
+        List<PmpAigcBean> sortedList = md5AigcBeanList.stream().sorted(Comparator.comparing(PmpAigcBean::getDocId)).collect(Collectors.toList());
+        String md5 = MD5Util.encrypt32(JSON.toJSONString(sortedList));
+        request.setMd5(md5);
+
+        AiGcPreprocRequest preprocRequest = new AiGcPreprocRequest();
+        preprocRequest.setMd5(request.getMd5());
+        preprocRequest.setWindCode(request.getDocBean().get(0).getWindCode());
+        preprocRequest.setNodeType(request.getNodeType());
+        String answerMG = this.getHangTreeText(preprocRequest);
+        //指标测试，先不用 MD5
+        if(StringUtils.isNotEmpty(answerMG) && !request.getNodeType().equals(Constants.NodeType.FOUR)){
+            return answerMG;
+        }else{
+            String answer = "";
+            if(request.getNodeType().equals(Constants.NodeType.ONE)){
+                //1:生成框架
+                answer = this.aigcFrameworkNoStreamRe(request);
+            } else if (request.getNodeType().equals(Constants.NodeType.TWO)) {
+                //2:拆解
+                answer = this.aigcBreakDownNoStreamRe(request);
+            } else if (request.getNodeType().equals(Constants.NodeType.FOUR)) {
+                //4:指标
+                answer = this.aigcIndNoStreamRe(request);
+            }
+            return answer;
+        }
+    }
+
+    /**
+     * 重新汇总
+     * AI投研框架->列表选项AIGC， 汇总用流输出  1:生成框架
+     * @param request
+     * @return
+     */
+    public String aigcFrameworkNoStreamRe(AiResearchReRequest request) {
+        String question = "总结上市公司的研究框架";
+        //内容集合
+        StringBuffer resultList = new StringBuffer();
+        List<String> resultTxtList = new ArrayList<>();
+        //调用pmpAigc非流接口集合bean
+        List<PmpAigcBean> pmpAigcBeanList = new ArrayList<>();
+
+        List<DocBean> paramsList = request.getDocBean();
+        for (int i = 0; i < paramsList.size(); i++) {
+            DocBean docBean = paramsList.get(i);
+            if(!docBean.isSubmitFlag()){
+                //continue; 汇总直接查 完成数据，不需要验证向量化接口
+            }
+            PmpAigcBean pmpAigcBean = new PmpAigcBean();
+            pmpAigcBean.setDocId(docBean.getDocId());
+            pmpAigcBean.setDocName(docBean.getDocName());
+            pmpAigcBean.setTitle(docBean.getTitle());
+            pmpAigcBean.setPromptId(docBean.getPromptId());
+            pmpAigcBean.setEventStreamFlg(true);
+            pmpAigcBean.setTaskId(docBean.getTaskId());
+            pmpAigcBean.setWindCode(docBean.getWindCode());
+            pmpAigcBean.setNodeType(request.getNodeType());
+            pmpAigcBeanList.add(pmpAigcBean);
+        }
+
+        //自有文档
+        if(request.isSelfDocFlg() && pmpAigcBeanList.size() > 0){
+            //是否N+1 自有文档 固定值  P045503
+            PmpAigcBean pmpAigcBean1 = new PmpAigcBean();
+            String md5 = pmpAigcBeanList.get(0).getWindCode() + request.getCompanyName();
+            pmpAigcBean1.setDocId(MD5Util.encrypt32(md5));
+            pmpAigcBean1.setDocName(request.getCompanyName()+ "-自有文档");
+            pmpAigcBean1.setTitle(request.getCompanyName()+ "-自有文档");
+            pmpAigcBean1.setPromptId(Constants.PromptId.PromptId_1_P045503);
+            pmpAigcBean1.setEventStreamFlg(true);
+            pmpAigcBean1.setWindCode(pmpAigcBeanList.get(0).getWindCode());
+            pmpAigcBean1.setNodeType(request.getNodeType());
+            pmpAigcBeanList.add(pmpAigcBean1);
+        }
+
+        //执行AIGC文档列表 //勾选的文档ID，过滤向量失败的文档ID
+        List<DocListBean> docListBeanList = new ArrayList<>();
+        for (PmpAigcBean pmpAigcBean: pmpAigcBeanList) {
+            AiGcBaseRequest baseRequest = new AiGcBaseRequest();
+            baseRequest.setDocId(pmpAigcBean.getDocId());
+            baseRequest.setWindCode(pmpAigcBean.getWindCode());
+            baseRequest.setPromptId(pmpAigcBean.getPromptId());
+            baseRequest.setNodeType(pmpAigcBean.getNodeType());
+            String mongoValue = mongoDBService.findMongoAiGcBase(baseRequest);
+            if (StringUtils.isNotEmpty(mongoValue)) {
+                resultTxtList.add(mongoValue);
+
+                DocListBean docListBean = new DocListBean();
+                docListBean.setFrameworkDocId(pmpAigcBean.getDocId());
+                docListBean.setFrameworkDocName(pmpAigcBean.getDocName());
+                docListBeanList.add(docListBean);
+            }
+        }
+
+        //内容合并
+        for (String result: resultTxtList) {
+            resultList.append("\n\n").append(result);
+        }
+
+        if (StringUtils.isEmpty(resultList.toString())) {
+            return null;
+        }
+
+        //股票代码 查找行业，映射枚举值
+        String industryType = "";
+        String framework = "";
+        if(request.getNodeType().equals(Constants.NodeType.ONE)){
+            String windCode = request.getDocBean().get(0).getWindCode();
+            String userId = config.getProperty("data.framework.userId", "6938791");
+            List<String> industryTypeList = teamIntroduceService.getIndustryType(windCode, Long.valueOf(userId));
+            log.info("industryTypeList:{}", JSONObject.toJSON(industryTypeList));
+            if(!CollectionUtils.isEmpty(industryTypeList)){
+                industryType = industryTypeList.get(0);
+                framework = MapEnumConstant.industryTypeMap.get(industryType);
+            }
+            log.info("windCode:{}, industryType:{}, framework:{}", windCode, industryType, framework);
+        }
+
+        //3、合并AIGC内容，再次调用AIGC非流接口
+        String promptId = request.getPromptId();
+        String companyName = request.getCompanyName();
+        String content = resultList.toString();
+
+        HashMap promptParams = new HashMap();
+        if (StringUtils.isNotBlank(companyName)) {
+            promptParams.put("companyName", companyName);
+        }
+        if (StringUtils.isNotBlank(question)) {
+            promptParams.put("question", question);
+        }
+        if (StringUtils.isNotBlank(content)) {
+            promptParams.put("content", content);
+        }
+        if (StringUtils.isNotBlank(framework)) {
+            promptParams.put("framework", framework);
+        }
+        String answer = aliceAigcAnswerHttpClient.pmpAigcNoStreamNew(promptParams, promptId);
+
+        AiGcPreprocRequest preprocRequest = new AiGcPreprocRequest();
+        preprocRequest.setWindCode(request.getDocBean().get(0).getWindCode());
+        preprocRequest.setNodeType(request.getNodeType());
+        preprocRequest.setPromptId(request.getPromptId());
+        preprocRequest.setText(answer.toString());
+        preprocRequest.setDocListBean(docListBeanList);
+        preprocRequest.setMd5(request.getMd5());
+        this.saveHangTree(preprocRequest);
+
+        return answer;
+    }
+
+    /**
+     * 重新汇总
+     * AI投研框架->列表选项AIGC， 汇总用流输出  2:拆解
+     * @param request
+     * @return
+     */
+    public String aigcBreakDownNoStreamRe(AiResearchReRequest request) {
+        String question = "拆解上市公司的研究内容";
+        //内容集合
+        StringBuffer resultList = new StringBuffer();
+        List<String> resultTxtList = new ArrayList<>();
+        //调用pmpAigc非流接口集合bean
+        List<PmpAigcBean> pmpAigcBeanList = new ArrayList<>();
+
+        List<DocBean> paramsList = request.getDocBean();
+        for (int i = 0; i < paramsList.size(); i++) {
+            DocBean docBean = paramsList.get(i);
+            if(!docBean.isSubmitFlag()){
+                //continue;
+            }
+            //固定值 P042848
+            String promptId = Constants.PromptId.PromptId_2_P042848;
+            PmpAigcBean pmpAigcBean = new PmpAigcBean();
+            pmpAigcBean.setPromptId(promptId);
+            pmpAigcBean.setDocId(docBean.getDocId());
+            pmpAigcBean.setDocName(docBean.getDocName());
+            pmpAigcBean.setTitle(docBean.getTitle());
+            pmpAigcBean.setWindCode(docBean.getWindCode());
+            pmpAigcBean.setNodeType(request.getNodeType());
+            pmpAigcBeanList.add(pmpAigcBean);
+        }
+
+        //执行AIGC文档列表 //勾选的文档ID，过滤向量失败的文档ID
+        List<DocListBean> docListBeanList = new ArrayList<>();
+        for (PmpAigcBean pmpAigcBean: pmpAigcBeanList) {
+            AiGcBaseRequest baseRequest = new AiGcBaseRequest();
+            baseRequest.setDocId(pmpAigcBean.getDocId());
+            baseRequest.setWindCode(pmpAigcBean.getWindCode());
+            baseRequest.setPromptId(pmpAigcBean.getPromptId());
+            baseRequest.setNodeType(pmpAigcBean.getNodeType());
+            String mongoValue = mongoDBService.findMongoAiGcBase(baseRequest);
+            if (StringUtils.isNotEmpty(mongoValue)) {
+                resultTxtList.add(mongoValue);
+
+                DocListBean docListBean = new DocListBean();
+                docListBean.setBreakdownDocId(pmpAigcBean.getDocId());
+                docListBean.setBreakdownDocName(pmpAigcBean.getDocName());
+                docListBeanList.add(docListBean);
+            }
+        }
+
+        //内容合并
+        for (String result: resultTxtList) {
+            resultList.append("\n\n").append(result);
+        }
+
+        if(StringUtils.isEmpty(resultList.toString())){
+            return null;
+        }
+        //3、合并AIGC内容，再次调用AIGC非流接口
+        String promptId = request.getPromptId();
+        String companyName = request.getCompanyName();
+        String content = resultList.toString();
+
+        HashMap promptParams = new HashMap();
+        if (StringUtils.isNotBlank(companyName)) {
+            promptParams.put("companyName", companyName);
+        }
+        if (StringUtils.isNotBlank(question)) {
+            promptParams.put("question", question);
+        }
+        if (StringUtils.isNotBlank(content)) {
+            promptParams.put("content", content);
+        }
+        String answer = aliceAigcAnswerHttpClient.pmpAigcNoStreamNew(promptParams, promptId);
+
+        AiGcPreprocRequest preprocRequest = new AiGcPreprocRequest();
+        preprocRequest.setWindCode(request.getDocBean().get(0).getWindCode());
+        preprocRequest.setNodeType(request.getNodeType());
+        preprocRequest.setPromptId(request.getPromptId());
+        preprocRequest.setText(answer.toString());
+        preprocRequest.setDocListBean(docListBeanList);
+        preprocRequest.setMd5(request.getMd5());
+        this.saveHangTree(preprocRequest);
+
+        return answer;
+    }
+
+    /**
+     * 重新汇总
+     * AI投研框架->列表选项AIGC， 汇总用流输出  4:生成指标
+     * @param request
+     * @return
+     */
+    public String aigcIndNoStreamRe(AiResearchReRequest request) {
+        //String question = "总结上市公司的研究指标";
+        //内容集合
+        StringBuffer resultList = new StringBuffer();
+        List<String> resultTxtList = new ArrayList<>();
+        List<PmpAigcBean> pmpAigcBeanList = new ArrayList<>();
+        List<DocListBean> docListBeanList = new ArrayList<>();
+        List<DocBean> paramsList = request.getDocBean();
+        for (int i = 0; i < paramsList.size(); i++) {
+            DocBean docBean = paramsList.get(i);
+            PmpAigcBean pmpAigcBean = new PmpAigcBean();
+            pmpAigcBean.setDocId(docBean.getDocId());
+            pmpAigcBean.setDocName(docBean.getDocName());
+            pmpAigcBean.setPromptId(docBean.getPromptId());
+            pmpAigcBean.setWindCode(docBean.getWindCode());
+            pmpAigcBean.setNodeType(request.getNodeType());
+            pmpAigcBeanList.add(pmpAigcBean);
+
+            DocListBean docListBean = new DocListBean();
+            docListBean.setBreakdownDocId(pmpAigcBean.getDocId());
+            docListBean.setBreakdownDocName(pmpAigcBean.getDocName());
+            docListBeanList.add(docListBean);
+        }
+
+        //根据 windCode + docid 获取指标 信息
+        String indContent = this.selectIndContent(pmpAigcBeanList);
+        if (!StringUtils.isEmpty(indContent)) {
+            resultTxtList.add(indContent);
+        }
+
+        //内容合并
+        for (String result: resultTxtList) {
+            resultList.append("\n\n").append(result);
+        }
+
+        if (StringUtils.isEmpty(resultList.toString())) {
+            return null;
+        }
+
+        //3、合并AIGC内容，再次调用AIGC非流接口  P050620
+        String promptId = request.getPromptId();
+        String companyName = request.getCompanyName();
+        String content = resultList.toString();
+
+        HashMap promptParams = new HashMap();
+        if (StringUtils.isNotBlank(companyName)) {
+            promptParams.put("companyName", companyName);
+        }
+        if (StringUtils.isNotBlank(content)) {
+            promptParams.put("content", content);
+        }
+        String answer = aliceAigcAnswerHttpClient.pmpAigcNoStreamNew(promptParams, promptId);
+
+        AiGcPreprocRequest preprocRequest = new AiGcPreprocRequest();
+        preprocRequest.setWindCode(request.getDocBean().get(0).getWindCode());
+        preprocRequest.setNodeType(request.getNodeType());
+        preprocRequest.setPromptId(request.getPromptId());
+        preprocRequest.setText(answer.toString());
+        preprocRequest.setDocListBean(docListBeanList);
+        preprocRequest.setMd5(request.getMd5());
+        this.saveHangTree(preprocRequest);
+
+        return answer;
+    }
+
+    /**
+     * AI投研框架->列表选项AIGC， 汇总用流输出
+     * @param request
+     * @return
+     */
+    public StreamChatResponse aiResearchAigcRe(AiResearchReRequest request) {
+        log.info("AIResearchService.aiResearchAigc: {}", JSONObject.toJSON(request));
+        if(CollectionUtils.isEmpty(request.getDocBean()) || StringUtils.isBlank(request.getNodeType())){
+            return null;
+        }
+        if(request.getNodeType().equals(Constants.NodeType.ONE)){
+            //1:生成框架
+            StreamChatResponse streamChatResponse = this.aigcFrameworkRe(request);
+            return streamChatResponse;
+        } else if (request.getNodeType().equals(Constants.NodeType.TWO)) {
+            //2:拆解
+            StreamChatResponse streamChatResponse = this.aigcBreakDownRe(request);
+            return streamChatResponse;
+        }
+        return null;
+    }
+
+    /**
+     * AI投研框架->列表选项AIGC， 汇总用流输出  1:生成框架
+     * @param request
+     * @return
+     */
+    public StreamChatResponse aigcFrameworkRe(AiResearchReRequest request) {
+        String question = "总结上市公司的研究框架";
+        //内容集合
+        StringBuffer resultList = new StringBuffer();
+        List<String> resultTxtList = new ArrayList<>();
+        //调用pmpAigc非流接口集合bean
+        List<PmpAigcBean> pmpAigcBeanList = new ArrayList<>();
+
+        List<DocBean> paramsList = request.getDocBean();
+        for (int i = 0; i < paramsList.size(); i++) {
+            DocBean docBean = paramsList.get(i);
+            PmpAigcBean pmpAigcBean = new PmpAigcBean();
+            pmpAigcBean.setDocId(docBean.getDocId());
+            pmpAigcBean.setTitle(docBean.getTitle());
+            pmpAigcBean.setPromptId(docBean.getPromptId());
+            pmpAigcBean.setEventStreamFlg(true);
+            pmpAigcBean.setTaskId(docBean.getTaskId());
+            pmpAigcBean.setWindCode(docBean.getWindCode());
+            pmpAigcBean.setNodeType(request.getNodeType());
+            pmpAigcBeanList.add(pmpAigcBean);
+        }
+
+        //自有文档
+        if(request.isSelfDocFlg() && pmpAigcBeanList.size() > 0){
+            //是否N+1 自有文档 固定值  P045503
+            PmpAigcBean pmpAigcBean1 = new PmpAigcBean();
+            String md5 = pmpAigcBeanList.get(0).getWindCode() + request.getCompanyName();
+            pmpAigcBean1.setDocId(MD5Util.encrypt32(md5));
+            pmpAigcBean1.setTitle(request.getCompanyName()+ "-自有文档");
+            pmpAigcBean1.setPromptId(Constants.PromptId.PromptId_1_P045503);
+            pmpAigcBean1.setEventStreamFlg(true);
+            pmpAigcBean1.setWindCode(pmpAigcBeanList.get(0).getWindCode());
+            pmpAigcBean1.setNodeType(request.getNodeType());
+            pmpAigcBeanList.add(pmpAigcBean1);
+        }
+
+        for (PmpAigcBean pmpAigcBean: pmpAigcBeanList) {
+            AiGcBaseRequest baseRequest = new AiGcBaseRequest();
+            baseRequest.setDocId(pmpAigcBean.getDocId());
+            baseRequest.setWindCode(pmpAigcBean.getWindCode());
+            baseRequest.setPromptId(pmpAigcBean.getPromptId());
+            baseRequest.setNodeType(pmpAigcBean.getNodeType());
+            String mongoValue = mongoDBService.findMongoAiGcBase(baseRequest);
+            if (StringUtils.isNotEmpty(mongoValue)) {
+                resultTxtList.add(mongoValue);
+            }
+        }
+
+        //内容合并
+        for (String result: resultTxtList) {
+            resultList.append("\n\n").append(result);
+        }
+
+        if (StringUtils.isEmpty(resultList.toString())) {
+            return null;
+        }
+
+        //股票代码 查找行业，映射枚举值
+        String industryType = "";
+        String framework = "";
+        if(request.getNodeType().equals(Constants.NodeType.ONE)){
+            String windCode = request.getDocBean().get(0).getWindCode();
+            String userId = config.getProperty("data.framework.userId", "6938791");
+            List<String> industryTypeList = teamIntroduceService.getIndustryType(windCode, Long.valueOf(userId));
+            log.info("industryTypeList:{}", JSONObject.toJSON(industryTypeList));
+            if(!CollectionUtils.isEmpty(industryTypeList)){
+                industryType = industryTypeList.get(0);
+                framework = MapEnumConstant.industryTypeMap.get(industryType);
+            }
+            log.info("windCode:{}, industryType:{}, framework:{}", windCode, industryType, framework);
+        }
+
+        //3、合并AIGC内容，再次调用AIGC流接口
+        String promptId = request.getPromptId();
+        String companyName = request.getCompanyName();
+        StreamChatResponse streamChatResponse = aliceAigcAnswerHttpClient.aigcResearchInfo(framework, promptId, companyName, resultList.toString(), question, "");
+        return streamChatResponse;
+    }
+
+    /**
+     * 重新汇总
+     * AI投研框架->列表选项AIGC， 汇总用流输出  2:拆解
+     * @param request
+     * @return
+     */
+    public StreamChatResponse aigcBreakDownRe(AiResearchReRequest request) {
+        String question = "拆解上市公司的研究内容";
+        //内容集合
+        StringBuffer resultList = new StringBuffer();
+        List<String> resultTxtList = new ArrayList<>();
+        //调用pmpAigc非流接口集合bean
+        List<PmpAigcBean> pmpAigcBeanList = new ArrayList<>();
+
+        List<DocBean> paramsList = request.getDocBean();
+        for (int i = 0; i < paramsList.size(); i++) {
+            DocBean docBean = paramsList.get(i);
+            //固定值 P042848
+            String promptId = Constants.PromptId.PromptId_2_P042848;
+            PmpAigcBean pmpAigcBean = new PmpAigcBean();
+            pmpAigcBean.setDocId(docBean.getDocId());
+            pmpAigcBean.setPromptId(promptId);
+            pmpAigcBean.setWindCode(docBean.getWindCode());
+            pmpAigcBean.setNodeType(request.getNodeType());
+            pmpAigcBeanList.add(pmpAigcBean);
+        }
+
+        for (PmpAigcBean pmpAigcBean: pmpAigcBeanList) {
+            AiGcBaseRequest baseRequest = new AiGcBaseRequest();
+            baseRequest.setDocId(pmpAigcBean.getDocId());
+            baseRequest.setWindCode(pmpAigcBean.getWindCode());
+            baseRequest.setPromptId(pmpAigcBean.getPromptId());
+            baseRequest.setNodeType(pmpAigcBean.getNodeType());
+            String mongoValue = mongoDBService.findMongoAiGcBase(baseRequest);
+            if (StringUtils.isNotEmpty(mongoValue)) {
+                resultTxtList.add(mongoValue);
+            }
+        }
+
+        //内容合并
+        for (String result: resultTxtList) {
+            resultList.append("\n\n").append(result);
+        }
+
+        if(StringUtils.isEmpty(resultList.toString())){
+            return null;
+        }
+        //3、合并AIGC内容，再次调用AIGC流接口
+        String promptId = request.getPromptId();
+        String companyName = request.getCompanyName();
+        StreamChatResponse streamChatResponse = aliceAigcAnswerHttpClient.aigcResearchInfo("", promptId, companyName, resultList.toString(), question, "");
+        return streamChatResponse;
+    }
+
+    /**
+     * AI投研框架->查询研报列表
+     * @param request
+     * @return
+     */
+    public Map<String, Object> getResearchReportList(ResearchReportEntity request) {
+        Map<String, Object> resultMap = new HashMap<>();
+        List<ResearchReportEntity> resultList = mongoDBService.findResearchReportList(request);
+        if(CollectionUtils.isEmpty(resultList)){
+            resultMap.put("total", 0);
+            resultMap.put("item", new ArrayList<>());
+            return resultMap;
+        }else{
+            resultMap.put("total", resultList.size());
+            resultMap.put("item", resultList);
+            return resultMap;
+        }
+    }
+
+    /**
+     * AI投研框架->清理研报列表
+     * @param request
+     * @return
+     */
+    public Map<String, Object> deleteResearchReport(ResearchReportEntity request) {
+        Map<String, Object> resultMap = new HashMap<>();
+        long deleteCount = mongoDBService.removeResearchReport(request);
+        resultMap.put("total", deleteCount);
+        resultMap.put("item", request.getWindCode());
+        return resultMap;
+    }
+
+    public void saveTaskSubmit(List<AiResearchBean> resultMap, AiResearchRequestTask requestTask) {
+        List<AiResearchBean> resultList;
+        //N+1 (n<=5)
+        if(resultMap.size() > 5){
+            //topFiveRecords
+            Collections.sort(resultMap, Comparator.comparing(AiResearchBean::getDate).reversed());
+            resultList = resultMap.subList(0, Math.min(5, resultMap.size()));
+        }else{
+            //添加到定时任务AIGC
+            resultList = resultMap;
+        }
+
+        for (AiResearchBean docBean: resultList) {
+            if (!docBean.isSubmitFlag()) {
+                //未向量化 用定时任务当个执行
+                //给定时任务添加submit执行任务
+                AiGcSubmitTaskEntity submitTask = new AiGcSubmitTaskEntity();
+                submitTask.setDocName(docBean.getAttechmenturl().getFilename());
+                submitTask.setDocId(docBean.getDocId());
+                submitTask.setUrl(docBean.getAttechmenturl().getUrl());
+                submitTask.setPublishDate(docBean.getDate());
+                submitTask.setTitle(docBean.getTitle());
+                submitTask.setWindCode(docBean.getWindcode().getValue());
+                submitTask.setCompanyName(docBean.getWindcode().getStockname());
+                submitTask.setTaskStatus(Constants.TaskStatus.ZERO);
+                mongoDBService.insertSubmitTask(submitTask);
+            }
+        }
+    }
+
+    /**
+     * @param request
+     * @return
+     */
+    public List<AiGcSubmitTaskEntity> getSubmitTaskList(AiGcSubmitTaskEntity request) {
+        List<AiGcSubmitTaskEntity> list = mongoDBService.findSubmitTaskList(request);
+        return list;
+    }
+
+    public Map<String, Object> updateSubmitTask(AiGcSubmitTaskEntity request) {
+        Map<String, Object> resultMap = new HashMap<>();
+        request.setTaskStatus(request.getTaskStatus()==null ? Constants.TaskStatus.ONE : request.getTaskStatus());
+        List<AiGcSubmitTaskEntity> list = mongoDBService.findSubmitTaskList(request);
+        for (AiGcSubmitTaskEntity update: list) {
+            update.setTaskStatus(Constants.TaskStatus.ZERO);
+            mongoDBService.updateSubmitTask(update);
+        }
+        resultMap.put("total", list.size());
+        resultMap.put("item", list);
+        return resultMap;
+    }
+
+    public Map<String, Object> removeSubmitTask(AiGcSubmitTaskEntity request) {
+        Map<String, Object> resultMap = new HashMap<>();
+        long deletedCount = mongoDBService.removeSubmitTask(request);
+        resultMap.put("total", deletedCount);
+        resultMap.put("item", request);
+        return resultMap;
+    }
+
+    /**
+     * 提交新的向量库
+     * @param requestBean
+     * @return
+     */
+    public boolean submitPost(AliceRequestBean requestBean) {
+        //查询是否提交过向量库
+        String checkVectorUrl = config.getProperty("docRecall.checkVector.existsUrl", "http://10.25.3.215:8000/docVector/v1/exists?doc_id=%s");
+        //String checkVectorUrl = config.getProperty("docRecall.checkVector.existsUrl", "http://10.15.4.107:8000/docVector/v1/exists-fulltext?doc_id=%s");
+        checkVectorUrl = String.format(checkVectorUrl, requestBean.getDecDocIdAndAttId());
+        String checkResult = httpProxyDecorator.getNewsVectorStatus(checkVectorUrl + "&bizType=first");
+        if (StringUtils.isEmpty(checkResult)) {
+            return false;
+        }
+        JSONObject checkResultJson = JSONObject.parseObject(checkResult);
+        int code = checkResultJson.getIntValue("code");
+        if (code == 0) {
+            return true;
+        }
+        String status = checkResultJson.getJSONObject("data").getString("status");
+        if (StringUtils.isNotEmpty(status) && (status.equals("missing") || status.equals("failed"))) {
+            //没有提交过向量库提交向量
+            String submitVectorUrl = config.getProperty("docRecall.checkVector.sumbmitUrl", "http://10.25.3.215:8000/docVector/v1/submit");
+            //String submitVectorUrl = config.getProperty("docRecall.checkVector.sumbmitUrl", "https://test.wind.com.cn/docVector/v1/submit");
+            Map<String, String> paraMap = new HashMap<>();
+            paraMap.put("doc_id", requestBean.getDecryptDocId());
+            paraMap.put("doc_type", requestBean.getDocType());
+            String submitResult = httpProxyDecorator.postV2(submitVectorUrl, JSONObject.toJSONString(paraMap));
+            if (StringUtils.isEmpty(submitResult)) {
+                //mailUtils.sendMail("摘要向量库提交失败","返回结果="+submitResult+"\ndocId="+requestBean.getDocId(),"newVector");
+                return false;
+            }
+            JSONObject submitResultJson = JSONObject.parseObject(submitResult);
+            int submitCode = submitResultJson.getIntValue("code");
+            if (submitCode != 0) {
+                return false;
+            }
+            return true;
+        }
+        long sleepTime = config.getLongProperty("query.abstract.vector.sleep.time", 4000l);
+        int queryCounts = config.getIntProperty("query.vector.abstract.counts", 3);
+        int count = 0;
+        //查询提交结果
+        while (true) {
+            ThreadUtil.sleep(sleepTime);
+            if (count > queryCounts) {
+                return false;
+            }
+            checkResult = httpProxyDecorator.getNewsVectorStatus(checkVectorUrl + "&bizType=Polling" + count);
+            if (StringUtils.isEmpty(checkResult)) {
+                return false;
+            }
+            checkResultJson = JSONObject.parseObject(checkResult);
+            code = checkResultJson.getIntValue("code");
+            if (code == 0) {
+                return true;
+            }
+            status = checkResultJson.getJSONObject("data").getString("status");
+            if (StringUtils.isEmpty(status)) {
+                //mailUtils.sendMail("摘要向量库状态","返回结果="+checkResult+"\ndocId="+requestBean.getDocId(),"newVector");
+                return false;
+            }
+            if (StringUtils.isNotEmpty(status) && status.equals("failed")) {//提交向量库失败了
+                return false;
+            }
+            count++;
+        }
+    }
+
+    /**
+     * AI投研框架->列表选项AIGC， 汇总用流输出
+     * @param request
+     * @return
+     */
+    public StreamChatResponse qualityInspection(QualityInspectionRequest request) {
+        log.info("AIResearchService.aiResearchFramework: {}", JSONObject.toJSON(request));
+        if(StringUtils.isBlank(request.getNodeType())){
+            return null;
+        }
+        if(request.getNodeType().equals(Constants.NodeType.ONE)){
+            //1:生成框架
+            StreamChatResponse streamChatResponse = this.aiFramework(request);
+            return streamChatResponse;
+        }
+        return null;
+    }
+
+
+    /**
+     * AI投研框架->列表选项AIGC， 汇总用流输出  1:生成框架
+     * @param request
+     * @return
+     */
+    public StreamChatResponse aiFramework(QualityInspectionRequest request) {
+        String question = "总结上市公司的研究框架";
+        //内容集合 //子框架
+        StringBuffer childFrameworkList = new StringBuffer();
+        List<String> resultTxtList = new ArrayList<>();
+        AiGcTaskEntity taskEntity = new AiGcTaskEntity();
+        taskEntity.setWindCode(request.getWindCode());
+        taskEntity.setNodeType(request.getNodeType());
+        List<AiGcTaskEntity> taskEntityList = mongoDBService.findMongoAiGcTaskList(taskEntity);
+        for (AiGcTaskEntity taskRequest: taskEntityList) {
+            //给默认值
+            taskRequest.setNodeType(StringUtils.isEmpty(request.getNodeType()) ? Constants.NodeType.ONE : request.getNodeType());
+            //start 查询AI数据是否已经存在
+            if(request.getNodeType().equals(Constants.NodeType.ONE)){
+                taskRequest.setPromptId(Constants.PromptId.PromptId_1_P042185);
+            }else if(request.getNodeType().equals(Constants.NodeType.TWO)){
+                taskRequest.setPromptId(Constants.PromptId.PromptId_2_P042848);
+            }
+            AiGcBaseRequest baseRequest = new AiGcBaseRequest();
+            baseRequest.setDocId(taskRequest.getDocId());
+            baseRequest.setWindCode(taskRequest.getWindCode());
+            baseRequest.setPromptId(taskRequest.getPromptId());
+            baseRequest.setNodeType(taskRequest.getNodeType());
+            String mongoValue = mongoDBService.findMongoAiGcBase(baseRequest);
+            if (StringUtils.isNotEmpty(mongoValue)) {
+                resultTxtList.add(mongoValue);
+            }
+        }
+
+        //调用pmpAigc非流接口集合bean
+        List<PmpAigcBean> pmpAigcBeanList = new ArrayList<>();
+        //自有文档
+        if(resultTxtList.size() > 0){
+            //是否N+1 自有文档 固定值  P045503
+            PmpAigcBean pmpAigcBean1 = new PmpAigcBean();
+            String md5 = request.getWindCode() + request.getCompanyName();
+            pmpAigcBean1.setDocId(MD5Util.encrypt32(md5));
+            pmpAigcBean1.setTitle(request.getCompanyName()+ "-自有文档");
+            pmpAigcBean1.setPromptId(Constants.PromptId.PromptId_1_P045503);
+            pmpAigcBean1.setEventStreamFlg(true);
+            pmpAigcBean1.setWindCode(request.getWindCode());
+            pmpAigcBean1.setNodeType(request.getNodeType());
+            pmpAigcBeanList.add(pmpAigcBean1);
+        }
+
+        for (PmpAigcBean pmpAigcBean: pmpAigcBeanList) {
+            AiGcBaseRequest baseRequest = new AiGcBaseRequest();
+            baseRequest.setDocId(pmpAigcBean.getDocId());
+            baseRequest.setWindCode(pmpAigcBean.getWindCode());
+            baseRequest.setPromptId(pmpAigcBean.getPromptId());
+            baseRequest.setNodeType(pmpAigcBean.getNodeType());
+            String mongoValue = mongoDBService.findMongoAiGcBase(baseRequest);
+            if (StringUtils.isNotEmpty(mongoValue)) {
+                resultTxtList.add(mongoValue);
+            }
+        }
+
+        //母框架
+        AiGcPreprocRequest preprocRequest = new AiGcPreprocRequest();
+        preprocRequest.setWindCode(request.getWindCode());
+        preprocRequest.setNodeType(request.getNodeType());
+        preprocRequest.setPromptId(Constants.PromptId.PromptId_1_P042256);
+        String parentFramework = this.getHangTreeText(preprocRequest);
+
+        //内容合并
+        for (String result: resultTxtList) {
+            childFrameworkList.append("\n\n").append(result);
+        }
+
+        if (StringUtils.isEmpty(childFrameworkList.toString())) {
+            return null;
+        }
+
+        //股票代码 查找行业，映射枚举值
+        String industryType = "";
+        String framework = "";
+        if(request.getNodeType().equals(Constants.NodeType.ONE)){
+            String windCode = request.getWindCode();
+            String userId = config.getProperty("data.summary.userId", "6938791");
+            List<String> industryTypeList = teamIntroduceService.getIndustryType(windCode, Long.valueOf(userId));
+            log.info("industryTypeList:{}", JSONObject.toJSON(industryTypeList));
+            if(!CollectionUtils.isEmpty(industryTypeList)){
+                industryType = industryTypeList.get(0);
+                framework = MapEnumConstant.industryTypeMap.get(industryType);
+            }
+            log.info("windCode:{}, industryType:{}, framework:{}", windCode, industryType, framework);
+        }
+
+        //3、合并AIGC内容，再次调用AIGC流接口  -质检结果 P048724
+        String promptId = Constants.PromptId.PromptId_1_P048724;
+        String companyName = request.getCompanyName();
+        StreamChatResponse streamChatResponse = aliceAigcAnswerHttpClient.aigcResearchInfoF(framework, promptId, companyName, childFrameworkList.toString(), question, parentFramework);
+        return streamChatResponse;
+    }
+
+    //根据 WindCode 获取指标 信息
+    public Map<String, Object> selectInd(AiGcPreprocRequest request) {
+        Map<String, Object> resultMap = new HashMap<>();
+        if (request.getWindCode().equals("test")) {
+            resultMap.put(request.getWindCode() + "-" + "B376EDB8CD76E4B7F49355F55CCCCBB8", "央行:逆回购:7天:利率:周\t\n");
+            return resultMap;
+        }
+        //给默认值 P042256
+        request.setNodeType(StringUtils.isEmpty(request.getNodeType()) ? Constants.NodeType.ONE : request.getNodeType());
+        request.setPromptId(StringUtils.isEmpty(request.getPromptId()) ? Constants.PromptId.PromptId_1_P042256 : request.getPromptId());
+        List<AiGcPreprocEntity> releaseList = mongoDBService.findMongoPreprocList(request);
+        if (CollectionUtils.isEmpty(releaseList)) {
+            return resultMap;
+        }
+        Set<String> resultList = new TreeSet<>();
+        List<DocListBean> docList = releaseList.get(0).getDocListBean();
+        for (DocListBean bean : docList) {
+            QueryPubIndDto indDto = new QueryPubIndDto();
+            List<String> docIdQuery = new ArrayList<>();
+            docIdQuery.add(bean.getFrameworkDocId());
+            indDto.setDocIdList(docIdQuery);
+            indDto.setWindCode(request.getWindCode());
+            List<PubReportIndicator> recordList = indicatorService.query(indDto);
+            for (PubReportIndicator indicator : recordList) {
+                StringBuffer aliMetrics = new StringBuffer();
+                if (StringUtils.isNotBlank(indicator.getIndLoc())) {
+                    aliMetrics.append(indicator.getIndLoc()).append(":");
+                }
+                if (StringUtils.isNotBlank(indicator.getIndLocAttr())) {
+                    aliMetrics.append(indicator.getIndLocAttr()).append(":");
+                }
+                if (StringUtils.isNotBlank(indicator.getIndOrg())) {
+                    aliMetrics.append(indicator.getIndOrg()).append(":");
+                }
+                if (StringUtils.isNotBlank(indicator.getIndOrgAttr())) {
+                    aliMetrics.append(indicator.getIndOrgAttr()).append(":");
+                }
+                if (StringUtils.isNotBlank(indicator.getIndEntity())) {
+                    aliMetrics.append(indicator.getIndEntity()).append(":");
+                }
+                if (StringUtils.isNotBlank(indicator.getIndEntityAttr())) {
+                    aliMetrics.append(indicator.getIndEntityAttr()).append(":");
+                }
+                if (StringUtils.isNotBlank(indicator.getIndBase())) {
+                    aliMetrics.append(indicator.getIndBase()).append(":");
+                }
+                if (StringUtils.isNotBlank(indicator.getIndDerivedCalc())) {
+                    aliMetrics.append(indicator.getIndDerivedCalc()).append(":");
+                }
+                String result = aliMetrics.toString().substring(0, aliMetrics.toString().length() - 1);
+                resultList.add(result);
+            }
+        }
+        String result = String.join("\n", resultList);
+        resultMap.put(request.getWindCode(), result);
+        return resultMap;
+    }
+
+    //根据 WindCode 获取指标 信息
+    public String selectIndContent(List<PmpAigcBean> pmpAigcBeanList) {
+        Set<String> resultList = new TreeSet<>();
+        for (PmpAigcBean bean : pmpAigcBeanList) {
+            QueryPubIndDto indDto = new QueryPubIndDto();
+            List<String> docIdQuery = new ArrayList<>();
+            docIdQuery.add(bean.getDocId());
+            indDto.setDocIdList(docIdQuery);
+            indDto.setWindCode(bean.getWindCode());
+            List<PubReportIndicator> recordList = indicatorService.query(indDto);
+            for (PubReportIndicator indicator : recordList) {
+                StringBuffer aliMetrics = new StringBuffer();
+                if (StringUtils.isNotBlank(indicator.getIndLoc())) {
+                    aliMetrics.append(indicator.getIndLoc()).append(":");
+                }
+                if (StringUtils.isNotBlank(indicator.getIndLocAttr())) {
+                    aliMetrics.append(indicator.getIndLocAttr()).append(":");
+                }
+                if (StringUtils.isNotBlank(indicator.getIndOrg())) {
+                    aliMetrics.append(indicator.getIndOrg()).append(":");
+                }
+                if (StringUtils.isNotBlank(indicator.getIndOrgAttr())) {
+                    aliMetrics.append(indicator.getIndOrgAttr()).append(":");
+                }
+                if (StringUtils.isNotBlank(indicator.getIndEntity())) {
+                    aliMetrics.append(indicator.getIndEntity()).append(":");
+                }
+                if (StringUtils.isNotBlank(indicator.getIndEntityAttr())) {
+                    aliMetrics.append(indicator.getIndEntityAttr()).append(":");
+                }
+                if (StringUtils.isNotBlank(indicator.getIndBase())) {
+                    aliMetrics.append(indicator.getIndBase()).append(":");
+                }
+                if (StringUtils.isNotBlank(indicator.getIndDerivedCalc())) {
+                    aliMetrics.append(indicator.getIndDerivedCalc()).append(":");
+                }
+                String result = aliMetrics.toString().substring(0, aliMetrics.toString().length() - 1);
+                resultList.add(result);
+            }
+        }
+        String result = String.join("\n", resultList);
+        return result;
+    }
+
+    /**
+     * AI投研框架->AI投研框架-> 根据条件 获取框架A
+     * @param request
+     * @return
+     */
+    public String getAiGcPreTxt(AiGcPreprocRequest request) {
+        List<AiGcPreprocEntity> list = mongoDBService.findMongoPreprocList(request);
+        StringBuffer buffer = new StringBuffer();
+        if (!CollectionUtils.isEmpty(list)) {
+            int re = 0;
+            for (int i = 0; i < list.size(); i++) {
+                AiGcPreprocEntity entity = list.get(i);
+                if (entity.getNodeLevel() <= 1) {
+                    buffer.append("\n").append(entity.getNodeText()).append("\n");
+                } else {
+                    buffer.append(entity.getNodeText()).append("\n");
+                    Optional<AiGcPreprocEntity> childList = list.stream().filter(item -> item.getNodePId().equals(entity.getNodeId())).findFirst();
+                    if (!childList.isPresent() && request.getNodeType().equals(Constants.NodeType.ONE)) {
+                        //末端加 Reference
+                        re++;
+                        int count = 0;
+                        if (entity.getNodeLevel() == 2) {
+                            count = 2;
+                        } else if (entity.getNodeLevel() == 3) {
+                            count = 4;
+                        } else if (entity.getNodeLevel() == 4) {
+                            count = 6;
+                        } else if (entity.getNodeLevel() == 5) {
+                            count = 8;
+                        } else if (entity.getNodeLevel() == 6) {
+                            count = 10;
+                        }
+                        String space = StrUtils.getSpaceByCount(" ", count);
+                        buffer.append(space + "- Reference" + re).append("\n");
+                    }
+                }
+            }
+        }
+        return buffer.toString();
+    }
+
+    public List<AiGcPreprocEntity> getAiGcPreList(AiGcPreprocRequest request) {
+        List<AiGcPreprocEntity> list = mongoDBService.findMongoPreprocList(request);
+        StringBuffer buffer = new StringBuffer();
+        if (!CollectionUtils.isEmpty(list)) {
+            int re = 0;
+            for (int i = 0; i < list.size(); i++) {
+                AiGcPreprocEntity entity = list.get(i);
+                if (entity.getNodeLevel() <= 1) {
+                    buffer.append("\n").append(entity.getNodeText()).append("\n");
+                } else {
+                    buffer.append(entity.getNodeText()).append("\n");
+                    Optional<AiGcPreprocEntity> childList = list.stream().filter(item -> item.getNodePId().equals(entity.getNodeId())).findFirst();
+                    if (!childList.isPresent() && request.getNodeType().equals(Constants.NodeType.ONE)) {
+                        //末端加 Reference
+                        re++;
+                        int count = 0;
+                        if (entity.getNodeLevel() == 2) {
+                            count = 2;
+                        } else if (entity.getNodeLevel() == 3) {
+                            count = 4;
+                        } else if (entity.getNodeLevel() == 4) {
+                            count = 6;
+                        } else if (entity.getNodeLevel() == 5) {
+                            count = 8;
+                        } else if (entity.getNodeLevel() == 6) {
+                            count = 10;
+                        }
+                        String space = StrUtils.getSpaceByCount(" ", count);
+                        buffer.append(space + "- Reference" + re).append("\n");
+                    }
+                }
+            }
+        }
+        request.setText(buffer.toString());
+        List<AiGcPreprocEntity> baseEntityList = mongoDBService.getAigcList(request);
+        return baseEntityList;
+    }
+
+    /**
+     * 聚合中间结果-非流输出
+     *
+     * @param request
+     * @return
+     */
+    public String betweenTreeNoStream(AiHangTreeRequest request) {
+        //第二步：框架A+实体事件=聚合中间结果1--aigc
+        if (StringUtils.isEmpty(request.getWindCode())) {
+            return "";
+        }
+        request.setNodeType(StringUtils.isEmpty(request.getNodeType()) ? Constants.NodeType.FIVE : request.getNodeType());
+
+        //获取框架信息
+        AiGcPreprocRequest request1 = new AiGcPreprocRequest();
+        request1.setWindCode(request.getWindCode());
+        request1.setNodeType(Constants.NodeType.ONE);
+        request1.setPromptId(Constants.PromptId.PromptId_1_P042256);
+        List<AiGcPreprocEntity> list = mongoDBService.findMongoPreprocList(request1);
+        if (CollectionUtils.isEmpty(list)) {
+            return "";
+        }
+        //list.sort(Comparator.comparing(o -> o.getNodeOrder()));
+        StringBuffer buffer = new StringBuffer();
+        int re = 0;
+        for (int i = 0; i < list.size(); i++) {
+            AiGcPreprocEntity entity = list.get(i);
+            if (entity.getNodeLevel() <= 1) {
+                buffer.append("\n").append(entity.getNodeText()).append("\n");
+            } else {
+                buffer.append(entity.getNodeText()).append("\n");
+                Optional<AiGcPreprocEntity> childList = list.stream().filter(item -> item.getNodePId().equals(entity.getNodeId())).findFirst();
+                if (!childList.isPresent()) {
+                    //末端加 Reference
+                    re++;
+                    int count = 0;
+                    if (entity.getNodeLevel() == 2) {
+                        count = 2;
+                    } else if (entity.getNodeLevel() == 3) {
+                        count = 4;
+                    } else if (entity.getNodeLevel() == 4) {
+                        count = 6;
+                    } else if (entity.getNodeLevel() == 5) {
+                        count = 8;
+                    } else if (entity.getNodeLevel() == 6) {
+                        count = 10;
+                    }
+                    String space = StrUtils.getSpaceByCount(" ", count);
+                    buffer.append(space + "- Reference" + re).append("\n");
+                }
+            }
+        }
+
+        //框架A
+        String frameworkText = buffer.toString();
+        request.setFrameworkText(frameworkText);
+
+        //获实体事件信息/获取指标信息
+        AiGcPreprocRequest request2 = new AiGcPreprocRequest();
+        request2.setWindCode(request.getWindCode());
+        if (request.getNodeType().equals(Constants.NodeType.FIVE)) {
+            //实体事件
+            request2.setNodeType(Constants.NodeType.TWO);
+            request2.setPromptId(Constants.PromptId.PromptId_2_P042254);
+        } else if (request.getNodeType().equals(Constants.NodeType.SIX)) {
+            //指标
+            request2.setNodeType(Constants.NodeType.FOUR);
+            request2.setPromptId(Constants.PromptId.PromptId_4_P050620);
+        }
+        String breakDownText = mongoDBService.findMongoPreproc(request2);
+        if (StringUtils.isEmpty(breakDownText)) {
+            return "";
+        }
+
+        //实体事件
+        request.setBreakDownText(breakDownText);
+
+        // 排序
+        List<DocListBean> sortedList = list.get(0).getDocListBean().stream().filter(bean -> bean.getFrameworkDocId() != null).sorted(Comparator.comparing(DocListBean::getFrameworkDocId)).collect(Collectors.toList());
+        // 排序
+        String md5 = MD5Util.encrypt32(JSON.toJSONString(sortedList));
+        AiGcPreprocRequest yzRequest = new AiGcPreprocRequest();
+        yzRequest.setMd5(md5);
+        yzRequest.setWindCode(request.getWindCode());
+        yzRequest.setNodeType(request.getNodeType());
+        String answerMG = this.getHangTreeText(yzRequest);
+        if (StringUtils.isNotEmpty(answerMG)) {
+            //return answerMG;
+        }
+
+        //聚合
+        String contentText = request.getFrameworkText() + "/n/n" + request.getBreakDownText();
+        //"P051132";
+        request.setPromptId(StringUtils.isEmpty(request.getPromptId()) ? Constants.PromptId.PromptId_5_P051132 : request.getPromptId());
+        String promptId = request.getPromptId();
+        String companyName = request.getCompanyName();
+
+        HashMap promptParams = new HashMap();
+        if (companyName != null) {
+            promptParams.put("companyName", companyName);
+        }
+        if (contentText != null) {
+            promptParams.put("content", contentText);
+        }
+        String answer = aliceAigcAnswerHttpClient.pmpAigcNoStreamNew(promptParams, promptId);
+
+        if (StringUtils.isNotEmpty(answer)) {
+            AiGcPreprocRequest preprocRequest = new AiGcPreprocRequest();
+            preprocRequest.setWindCode(request.getWindCode());
+            preprocRequest.setNodeType(request.getNodeType());
+            preprocRequest.setPromptId(promptId);
+            preprocRequest.setDocListBean(sortedList);
+            preprocRequest.setText(answer);
+            preprocRequest.setMd5(md5);
+            this.saveHangTree(preprocRequest);
+        }
+        return answer;
+    }
+
+    /**
+     * 第四步 Reference拼接（框架A+（结果1+结果2））
+     *
+     * @param request
+     * @return
+     */
+    public String betweenTreeAppend(AiHangTreeRequest request) {
+        if (StringUtils.isEmpty(request.getWindCode())) {
+            return "";
+        }
+        request.setNodeType(StringUtils.isEmpty(request.getNodeType()) ? Constants.NodeType.FIVE : request.getNodeType());
+
+        //框架A
+        AiGcPreprocRequest request1 = new AiGcPreprocRequest();
+        request1.setWindCode(request.getWindCode());
+        request1.setNodeType(Constants.NodeType.ONE);
+        request1.setPromptId(Constants.PromptId.PromptId_1_P042256);
+        List<AiGcPreprocEntity> frameworkTextList = this.getAiGcPreList(request1);
+        if (CollectionUtils.isEmpty(frameworkTextList)) {
+            return "";
+        }
+
+        //获实体事件信息
+        AiGcPreprocRequest request2 = new AiGcPreprocRequest();
+        request2.setWindCode(request.getWindCode());
+        //实体事件
+        request2.setNodeType(Constants.NodeType.FIVE);
+        request2.setPromptId(Constants.PromptId.PromptId_5_P051132);
+        List<AiGcPreprocEntity> breakDownTextList2 = mongoDBService.findMongoPreprocList(request2);
+        if (CollectionUtils.isEmpty(breakDownTextList2)) {
+            return "";
+        }
+
+        //获取指标信息
+        AiGcPreprocRequest request3 = new AiGcPreprocRequest();
+        request3.setWindCode(request.getWindCode());
+        //指标
+        request3.setNodeType(Constants.NodeType.SIX);
+        request3.setPromptId(Constants.PromptId.PromptId_6_P051133);
+        List<AiGcPreprocEntity> breakDownTextList3 = mongoDBService.findMongoPreprocList(request3);
+        if (CollectionUtils.isEmpty(breakDownTextList3)) {
+            return "";
+        }
+
+        //实体事件
+        Map<String, String> result2 = new HashMap<>();
+        for (AiGcPreprocEntity item : breakDownTextList2) {
+            if (item.getNodeText().contains("Reference")) {
+                int start = item.getNodeText().indexOf("：");
+                String startText = item.getNodeText().substring(0, start).replace("*", "");
+                ;
+                String endText = item.getNodeText().substring(start + 1, item.getNodeText().length());
+                result2.put(startText, endText);
+            }
+        }
+
+        //指标
+        Map<String, String> result3 = new HashMap<>();
+        for (AiGcPreprocEntity item : breakDownTextList3) {
+            if (item.getNodeText().contains("Reference")) {
+                int start = item.getNodeText().indexOf("：");
+                String startText = item.getNodeText().substring(0, start).replace("*", "");
+                String endText = item.getNodeText().substring(start + 1, item.getNodeText().length());
+                result3.put(startText, endText);
+            }
+        }
+
+        for (AiGcPreprocEntity item : frameworkTextList) {
+            if (item.getNodeText().contains("Reference")) {
+                int count = 0;
+                if (item.getNodeLevel() == 2) {
+                    count = 0;
+                } else if (item.getNodeLevel() == 3) {
+                    count = 2;
+                } else if (item.getNodeLevel() == 4) {
+                    count = 4;
+                } else if (item.getNodeLevel() == 5) {
+                    count = 6;
+                } else if (item.getNodeLevel() == 6) {
+                    count = 8;
+                }
+                String space = StrUtils.getSpaceByCount(" ", count) + "- ";
+                String frameworkReference = item.getNodeText().substring(count, item.getNodeText().length());
+                String breakDownText2 = result2.get(frameworkReference);
+                String breakDownText3 = result3.get(frameworkReference);
+                String nodeText = "";
+                if (!StringUtils.isEmpty(breakDownText2) && !StringUtils.isEmpty(breakDownText3)) {
+                    nodeText = space + breakDownText2 + "； " + breakDownText3;
+                } else if (!StringUtils.isEmpty(breakDownText2)) {
+                    nodeText = space + breakDownText2;
+                } else if (!StringUtils.isEmpty(breakDownText3)) {
+                    nodeText = space + breakDownText3;
+                }
+                item.setNodeText(nodeText);
+            }
+        }
+
+        frameworkTextList.sort(Comparator.comparing(o -> o.getNodeOrder()));
+        StringBuffer buffer = new StringBuffer();
+        for (int i = 0; i < frameworkTextList.size(); i++) {
+            AiGcPreprocEntity entity = frameworkTextList.get(i);
+            if (entity.getNodeLevel() <= 1) {
+                buffer.append("\n").append(entity.getNodeText()).append("\n");
+            } else if (StringUtils.isNotEmpty(entity.getNodeText())) {
+                buffer.append(entity.getNodeText()).append("\n");
+            }
+        }
+        return buffer.toString();
+    }
+}
