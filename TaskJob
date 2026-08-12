@@ -1,0 +1,53 @@
+package com.wind.stock.readerRule.rulemanage.job;
+
+import com.ctrip.framework.apollo.Config;
+import com.ctrip.framework.apollo.spring.annotation.ApolloConfig;
+import com.wind.stock.readerRule.rulemanage.bean.request.OperateLogRequest;
+import com.wind.stock.readerRule.rulemanage.service.OperateLogService;
+import com.wind.stock.readerRule.rulemanage.utils.DateUtil;
+import jakarta.annotation.PostConstruct;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Component;
+
+/**
+ * @author yangxw
+ * @data 2025-08-12
+ */
+@Slf4j
+@Component
+public class TaskJob {
+
+    @ApolloConfig
+    private Config config;
+
+    //一天（24 * 60 * 60）, 60 = 1分钟
+    public static final int REDIS_TTL = 20 * 60;
+    @Autowired
+    private OperateLogService logService;
+
+    @PostConstruct
+    public void init() {
+        log.info("初始化任务数据");
+    }
+
+
+    //@Scheduled(cron = "0 0/1 * * * ?")
+    @Scheduled(cron = "0 0 1 * * ?")
+    public String taskJob() {
+        try {
+            OperateLogRequest record = new OperateLogRequest();
+            record.setEndTime(DateUtil.format(DateUtil.getBeforeDays(30), DateUtil.YYYY_MM_DD_HH_MM_SS));
+            Long count = logService.deleteByExample(record);
+            return count + "";
+        } catch (Exception e) {
+            log.error("taskJob.执行删除任务失败:{}", e.getMessage());
+        } finally {
+        }
+        log.info("taskJob-job结束, reidsvalue:{}", 0);
+        return "0";
+    }
+
+
+}
