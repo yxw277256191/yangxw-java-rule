@@ -1,0 +1,837 @@
+package com.wind.stock.airesearch.common.client;
+
+import cn.com.wind.stock.base.common.bean.UserBean;
+import cn.com.wind.stock.base.common.constants.WindConstants;
+import cn.com.wind.stock.base.componets.client.redis.sender.RedisManager;
+import cn.hutool.core.date.StopWatch;
+import cn.hutool.core.util.IdUtil;
+import cn.hutool.core.util.StrUtil;
+import cn.hutool.http.HttpResponse;
+import cn.hutool.http.HttpUtil;
+import com.alibaba.fastjson.JSONArray;
+import com.alibaba.fastjson.JSONObject;
+import com.ctrip.framework.apollo.Config;
+import com.ctrip.framework.apollo.spring.annotation.ApolloConfig;
+import com.wind.stock.airesearch.common.auth.InjectVariable;
+import com.wind.stock.airesearch.common.burying.BuryingLog;
+import com.wind.stock.airesearch.common.exception.exp.AliceProcessException;
+import com.wind.stock.airesearch.common.exception.exp.HttpServerException;
+import com.wind.stock.airesearch.common.utils.ExceptionUtils;
+import com.wind.stock.airesearch.common.utils.SpringProfileUtils;
+import com.wind.stock.airesearch.framework.bean.response.HttpAnswerResponse;
+import lombok.extern.slf4j.Slf4j;
+import okhttp3.*;
+import org.apache.commons.lang3.StringUtils;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Component;
+
+import java.io.IOException;
+import java.util.*;
+import java.util.concurrent.TimeUnit;
+
+/**
+ * Http操作修饰器.
+ *
+ * @author by flliu.belaban
+ * @date 2023/7/11
+ */
+@Slf4j
+@Component
+public class HttpProxyDecorator {
+
+    private static final int TIME_OUT = 70 * 1000;
+    @Autowired
+    private RedisManager redisManager;
+    @ApolloConfig
+    private Config config;
+    // 设置3天 ，一天（24 * 60 * 60 * 1000）
+    // public static final int REDIS_TTL = 3 * 24 * 60 * 60 * 1000;
+    public static final int REDIS_TTL = 10 * 60 * 1000;
+
+    @BuryingLog(apiUrl = "#{url}")
+    public String post(String url, String parameterString) {
+        Map<String, String> headers = new HashMap<>(8);
+        headers.put("Content-Type", "application/json;charset=utf-8");
+        headers.put("Accept", "application/json");
+        headers.put("Trace-ID", InjectVariable.getRequestId());
+        String userSessionId = InjectVariable.getUserSessionId();
+        if (SpringProfileUtils.devProfile() && needDevSession(url)) userSessionId = "d811d590f72541de8308131e3ccb7a39";
+        headers.put("wind.sessionid", userSessionId);
+        StopWatch stopWatch = StopWatch.create(IdUtil.randomUUID());
+        stopWatch.start();
+        try {
+            log.info("http post request {}, parameter {}, header {}", url, parameterString.substring(0, Math.min(parameterString.length(), 1000)), headers.toString());
+            HttpResponse execute = HttpUtil.createPost(url).setReadTimeout(600000).headerMap(headers, true).body(parameterString).timeout(TIME_OUT).execute();
+            String body = execute.body();
+            log.info("http post response {}, result {}", url, body.substring(0, Math.min(body.length(), 1000)));
+            return body;
+        } catch (Exception e) {
+            throw new HttpServerException(e.getMessage(), e);
+        } finally {
+            stopWatch.stop();
+            long millis = stopWatch.getLastTaskTimeMillis();
+            if (millis > TimeUnit.SECONDS.toMillis(1)) {
+                log.warn("Http {} cost {} ms.", url, millis);
+            }
+        }
+    }
+
+    @BuryingLog(apiUrl = "#{url}")
+    public String postV2(String url, String parameterString) {
+        int readTimeOut = config.getIntProperty("http.read.timeout", 200000);
+        int connectionTimeOut = config.getIntProperty("http.connection.timeout", 5000);
+        long now = System.currentTimeMillis();
+        Map<String, String> headers = new HashMap<>(8);
+        headers.put("Content-Type", "application/json;charset=utf-8");
+        headers.put("Accept", "application/json");
+        headers.put("X-App-id", "Wind.Stock.AIresearch.Framework");
+        headers.put("Trace-ID", UUID.randomUUID().toString().replace("-", ""));
+        headers.put("trace_src", "Wind.Stock.AIresearch.Framework");
+        headers.put("trace_id", UUID.randomUUID().toString().replace("-", ""));
+        headers.put("X-Routing-Key", config.getProperty("parse.chunks.routing-key", "10.24.12.39"));
+        headers.put("X-User-Id", InjectVariable.getUserId());
+        String userSessionId = InjectVariable.getUserSessionId();
+        if (SpringProfileUtils.devProfile() && needDevSession(url)) userSessionId = "d811d590f72541de8308131e3ccb7a39";
+        headers.put("wind.sessionid", userSessionId);
+        StopWatch stopWatch = StopWatch.create(IdUtil.randomUUID());
+        stopWatch.start();
+        try {
+            if (parameterString != null) {
+                log.info("http post request {}, parameter {}, header {}", url, parameterString.substring(0, Math.min(parameterString.length(), 1000)), headers.toString());
+            }
+            HttpResponse execute = HttpUtil.createPost(url)
+                    .setReadTimeout(readTimeOut)
+                    .setConnectionTimeout(connectionTimeOut)
+                    .timeout(60000) // 统一设置超时时间（包括写入）
+                    .headerMap(headers, true)
+                    .body(parameterString)
+                    .execute();
+            String body = execute.body();
+            log.info("http post response {}, result {} {} {}", url, body.substring(0, Math.min(body.length(), 1000)), System.currentTimeMillis() - now, execute.getStatus());
+            return body;
+        } catch (Exception e) {
+            throw new HttpServerException(e.getMessage(), e);
+        } finally {
+            stopWatch.stop();
+            long millis = stopWatch.getLastTaskTimeMillis();
+            if (millis > TimeUnit.SECONDS.toMillis(1)) {
+                log.warn("Http {} cost {} ms.", url, millis);
+            }
+        }
+    }
+
+    @BuryingLog(apiUrl = "#{url}")
+    public String postTimeOut(String url, String parameterString, String timeout) {
+        Map<String, String> headers = new HashMap<>(8);
+        headers.put("Content-Type", "application/json;charset=utf-8");
+        headers.put("Accept", "application/json");
+        headers.put("Trace-ID", InjectVariable.getRequestId());
+        String userSessionId = InjectVariable.getUserSessionId();
+        if (SpringProfileUtils.devProfile() && needDevSession(url)) userSessionId = "d811d590f72541de8308131e3ccb7a39";
+        headers.put("wind.sessionid", userSessionId);
+        StopWatch stopWatch = StopWatch.create(IdUtil.randomUUID());
+        stopWatch.start();
+        try {
+            log.info("http postTimeOut request {}, parameter {}, header {}", url, parameterString, headers.toString());
+            HttpResponse execute = HttpUtil.createPost(url).setReadTimeout(Integer.valueOf(timeout)).headerMap(headers, true).body(parameterString).timeout(120000).execute();
+            String body = execute.body();
+            log.info("http postTimeOut response {}, result {}", url, body.substring(0, Math.min(body.length(), 1000)));
+            return body;
+        } catch (Exception e) {
+            throw new HttpServerException(e.getMessage(), e);
+        } finally {
+            stopWatch.stop();
+            long millis = stopWatch.getLastTaskTimeMillis();
+            if (millis > TimeUnit.SECONDS.toMillis(1)) {
+                log.warn("Http {} cost {} ms.", url, millis);
+            }
+        }
+    }
+
+    @BuryingLog(apiUrl = "#{url}")
+    public String generalAigc(String url, String param) {
+        StringBuilder answer = new StringBuilder();
+        Response response = null;
+        try {
+            OkHttpClient client = new OkHttpClient.Builder()
+                    .connectTimeout(60, TimeUnit.SECONDS)
+                    .writeTimeout(60, TimeUnit.SECONDS)
+                    .readTimeout(60, TimeUnit.SECONDS)
+                    .build();
+            MediaType mediaType = MediaType.parse("application/json");
+            RequestBody body = RequestBody.create(mediaType, param);
+            Request okRequest = new Request.Builder()
+                    .url(url)
+                    .post(body)
+                    .addHeader("Content-Type", "application/json")
+                    .addHeader(WindConstants.SESSION_ID, InjectVariable.getUserSessionId())
+                    .build();
+            response = client.newCall(okRequest).execute();
+            log.info("getAliceStreamResponse#getResponse result={}", response);
+            String line = null;
+            while ((line = Objects.requireNonNull(response.body()).source().readUtf8Line()) != null) {
+                if (line.equals("data: [DONE]") || line.contains("[DONE]")) {
+                    break;
+                } else if (line.startsWith("data:")) {
+                    String dataStr = line.substring("data:".length()).trim();
+                    JSONObject responseJson;
+                    try {
+                        responseJson = JSONObject.parseObject(dataStr);
+                        String content = responseJson
+                                .getJSONArray("choices")
+                                .getJSONObject(0)
+                                .getJSONObject("delta")
+                                .getString("content");
+                        if (StrUtil.isNotEmpty(content)) {
+                            answer.append(content);
+                        }
+                    } catch (Exception e) {
+                        log.error("alice response extract err, origin content: {} errMsg:{}",
+                                line, ExceptionUtils.stacktraceToString(e, 8));
+                    }
+                }
+            }
+            return answer.toString();
+        } catch (IOException e) {
+            String errMsg = ExceptionUtils.stacktraceToString(e, 8);
+            log.error("canot acquire ext/event-stream response err:{}", errMsg);
+            throw new AliceProcessException("canot acquire ext/event-stream response errMsg:" + errMsg, null);
+        } finally {
+            try {
+                response.close();
+            } catch (Exception e) {
+
+            }
+        }
+    }
+
+
+    public String postNoLink(String url, String parameterString) {
+        Map<String, String> headers = new HashMap<>(8);
+        headers.put("Content-Type", "application/json;charset=utf-8");
+        headers.put("Accept", "application/json");
+        headers.put("Trace-ID", InjectVariable.getRequestId());
+        String userSessionId = InjectVariable.getUserSessionId();
+        if (SpringProfileUtils.devProfile() && needDevSession(url)) userSessionId = "d811d590f72541de8308131e3ccb7a39";
+        headers.put("wind.sessionid", userSessionId);
+        StopWatch stopWatch = StopWatch.create(IdUtil.randomUUID());
+        stopWatch.start();
+        try {
+            log.info("http post request {}, parameter {}, header {}", url, parameterString.substring(0, Math.min(parameterString.length(), 1000)), headers.toString());
+            HttpResponse execute = HttpUtil.createPost(url).headerMap(headers, true).body(parameterString).timeout(TIME_OUT).execute();
+            String body = execute.body();
+            log.info("http post response {}, result {}", url, body.substring(0, Math.min(body.length(), 1000)));
+            return body;
+        } catch (Exception e) {
+            throw new HttpServerException(e.getMessage(), e);
+        } finally {
+            stopWatch.stop();
+            long millis = stopWatch.getLastTaskTimeMillis();
+            if (millis > TimeUnit.SECONDS.toMillis(1)) {
+                log.warn("Http {} cost {} ms.", url, millis);
+            }
+        }
+    }
+
+    @BuryingLog(apiUrl = "#{url}")
+    public String postUrlencoded(String url, String parameterString) {
+        Map<String, String> headers = new HashMap<>(8);
+        String userSessionId = InjectVariable.getUserSessionId();
+        if (SpringProfileUtils.devProfile() && needDevSession(url)) userSessionId = "864727701d684c57ae9d1d03231a15a5";
+        headers.put("wind.sessionid", userSessionId);
+        StopWatch stopWatch = StopWatch.create(IdUtil.randomUUID());
+        stopWatch.start();
+        try {
+            log.info("http post request {}, parameter {}, header {}", url, parameterString.substring(0, Math.min(parameterString.length(), 1000)), headers.toString());
+            HttpResponse execute = HttpUtil.createPost(url).headerMap(headers, true).form(JSONObject.parseObject(parameterString).getInnerMap()).timeout(TIME_OUT).execute();
+            String body = execute.body();
+            log.info("http post response {}, result {}", url, body.substring(0, Math.min(body.length(), 1000)));
+            return body;
+        } catch (Exception e) {
+            throw new HttpServerException(e.getMessage(), e);
+        } finally {
+            stopWatch.stop();
+            long millis = stopWatch.getLastTaskTimeMillis();
+            if (millis > TimeUnit.SECONDS.toMillis(1)) {
+                log.warn("Http {} cost {} ms.", url, millis);
+            }
+        }
+    }
+
+    public String postNoLinkv2(String url, String parameterString, UserBean userBean) {
+        Map<String, String> headers = new HashMap<>(8);
+        headers.put("Content-Type", "application/json;charset=utf-8");
+        headers.put("Accept", "application/json");
+        headers.put("Trace-ID", IdUtil.randomUUID());
+        String userSessionId = userBean.getSessionId();
+        if (SpringProfileUtils.devProfile() && needDevSession(url)) userSessionId = "d811d590f72541de8308131e3ccb7a39";
+        headers.put("wind.sessionid", userSessionId);
+        StopWatch stopWatch = StopWatch.create(IdUtil.randomUUID());
+        stopWatch.start();
+        try {
+            log.info("http post request {}, parameter {}, header {}", url, parameterString.substring(0, Math.min(parameterString.length(), 1000)), headers.toString());
+            HttpResponse execute = HttpUtil.createPost(url).headerMap(headers, true).body(parameterString).timeout(TIME_OUT).execute();
+            String body = execute.body();
+            log.info("http post response {}, result {}", url, body.substring(0, Math.min(body.length(), 1000)));
+            return body;
+        } catch (Exception e) {
+            throw new HttpServerException(e.getMessage(), e);
+        } finally {
+            stopWatch.stop();
+            long millis = stopWatch.getLastTaskTimeMillis();
+            if (millis > TimeUnit.SECONDS.toMillis(1)) {
+                log.warn("Http {} cost {} ms.", url, millis);
+            }
+        }
+    }
+
+    @BuryingLog(apiUrl = "#{url}")
+    public String postUrlencodedV2(String url, String parameterString) {
+        Map<String, String> headers = new HashMap<>(8);
+        String userSessionId = InjectVariable.getUserSessionId();
+        if (SpringProfileUtils.devProfile() && needDevSession(url)) userSessionId = "864727701d684c57ae9d1d03231a15a5";
+        headers.put("wind.sessionid", userSessionId);
+        StopWatch stopWatch = StopWatch.create(IdUtil.randomUUID());
+        stopWatch.start();
+        try {
+            log.info("http post request {}, parameter {}, header {}", url, parameterString.substring(0, Math.min(parameterString.length(), 1000)), headers.toString());
+            HttpResponse execute = HttpUtil.createPost(url).headerMap(headers, true).form(JSONObject.parseObject(parameterString).getInnerMap()).timeout(TIME_OUT).execute();
+            String body = execute.body();
+            log.info("http post response {}, result {}", url, body.substring(0, Math.min(body.length(), 1000)));
+            return body;
+        } catch (Exception e) {
+            throw new HttpServerException(e.getMessage(), e);
+        } finally {
+            stopWatch.stop();
+            long millis = stopWatch.getLastTaskTimeMillis();
+            if (millis > TimeUnit.SECONDS.toMillis(1)) {
+                log.warn("Http {} cost {} ms.", url, millis);
+            }
+        }
+    }
+
+    @BuryingLog(apiUrl = "#{url}")
+    public String postUrlencodedV2(String url, String parameterString, UserBean userBean) {
+        Map<String, String> headers = new HashMap<>(8);
+        String userSessionId = userBean.getSessionId();
+        if (SpringProfileUtils.devProfile() && needDevSession(url)) userSessionId = "864727701d684c57ae9d1d03231a15a5";
+        headers.put("wind.sessionid", userSessionId);
+        StopWatch stopWatch = StopWatch.create(IdUtil.randomUUID());
+        stopWatch.start();
+        try {
+            log.info("http post request {}, parameter {}, header {}", url, parameterString.substring(0, Math.min(parameterString.length(), 1000)), headers.toString());
+            HttpResponse execute = HttpUtil.createPost(url).headerMap(headers, true).form(JSONObject.parseObject(parameterString).getInnerMap()).timeout(TIME_OUT).execute();
+            String body = execute.body();
+            log.info("http post response {}, result {}", url, body.substring(0, Math.min(body.length(), 1000)));
+            return body;
+        } catch (Exception e) {
+            throw new HttpServerException(e.getMessage(), e);
+        } finally {
+            stopWatch.stop();
+            long millis = stopWatch.getLastTaskTimeMillis();
+            if (millis > TimeUnit.SECONDS.toMillis(1)) {
+                log.warn("Http {} cost {} ms.", url, millis);
+            }
+        }
+    }
+
+    public String postUrlencodedV2NotLink(String url, String parameterString, UserBean userBean) {
+        Map<String, String> headers = new HashMap<>(8);
+        String userSessionId = userBean.getSessionId();
+        if (SpringProfileUtils.devProfile() && needDevSession(url)) userSessionId = "864727701d684c57ae9d1d03231a15a5";
+        headers.put("wind.sessionid", userSessionId);
+        StopWatch stopWatch = StopWatch.create(IdUtil.randomUUID());
+        stopWatch.start();
+        try {
+            log.info("http post request {}, parameter {}, header {}", url, parameterString.substring(0, Math.min(parameterString.length(), 1000)), headers.toString());
+            HttpResponse execute = HttpUtil.createPost(url).headerMap(headers, true).form(JSONObject.parseObject(parameterString).getInnerMap()).timeout(TIME_OUT).execute();
+            String body = execute.body();
+            log.info("http post response {}, result {}", url, body.substring(0, Math.min(body.length(), 1000)));
+            return body;
+        } catch (Exception e) {
+            throw new HttpServerException(e.getMessage(), e);
+        } finally {
+            stopWatch.stop();
+            long millis = stopWatch.getLastTaskTimeMillis();
+            if (millis > TimeUnit.SECONDS.toMillis(1)) {
+                log.warn("Http {} cost {} ms.", url, millis);
+            }
+        }
+    }
+
+    private boolean needDevSession(String url) {
+        return url.contains("/WindJCloudFileWeb/node");
+    }
+
+    public String postWithSpecifySession(String url, String parameterString, String sessionId) {
+
+        Map<String, String> headers = new HashMap<>(8);
+        headers.put("Content-Type", "application/json;charset=utf-8");
+        headers.put("Accept", "application/json");
+        headers.put("wind.sessionid", sessionId);
+
+        StopWatch stopWatch = StopWatch.create(IdUtil.randomUUID());
+        stopWatch.start();
+
+        try {
+            log.info("http post request {}, parameter {}, header {}", url, parameterString.substring(0, Math.min(parameterString.length(), 1000)), headers.toString());
+            HttpResponse execute = HttpUtil.createPost(url).headerMap(headers, true).body(parameterString).timeout(TIME_OUT).execute();
+            String body = execute.body();
+            log.info("http post response {}, result {}", url, body.substring(0, Math.min(body.length(), 1000)));
+            return body;
+        } catch (Exception e) {
+            throw new HttpServerException(e.getMessage(), e);
+        } finally {
+            stopWatch.stop();
+            long millis = stopWatch.getLastTaskTimeMillis();
+            if (millis > TimeUnit.SECONDS.toMillis(1)) {
+                log.warn("Http {} cost {} ms.", url, millis);
+            }
+        }
+    }
+
+    public String postWithoutSession(String url, String parameterString) {
+
+        Map<String, String> headers = new HashMap<>(8);
+        headers.put("Content-Type", "application/json;charset=utf-8");
+        headers.put("Accept", "application/json");
+
+        StopWatch stopWatch = StopWatch.create(IdUtil.randomUUID());
+        stopWatch.start();
+
+        try {
+            log.info("http post request {}, parameter {}, header {}", url, parameterString.substring(0, Math.min(parameterString.length(), 1000)), headers.toString());
+            HttpResponse execute = HttpUtil.createPost(url).headerMap(headers, true).body(parameterString).timeout(TIME_OUT).execute();
+            String body = execute.body();
+            log.info("http post response {}, result {}", url, body.substring(0, Math.min(body.length(), 1000)));
+            return body;
+        } catch (Exception e) {
+            throw new HttpServerException(e.getMessage(), e);
+        } finally {
+            stopWatch.stop();
+            long millis = stopWatch.getLastTaskTimeMillis();
+            if (millis > TimeUnit.SECONDS.toMillis(1)) {
+                log.warn("Http {} cost {} ms.", url, millis);
+            }
+        }
+    }
+
+    public String get(String url) {
+        Map<String, String> headers = new HashMap<>(8);
+        headers.put("wind.sessionid", InjectVariable.getUserSessionId());
+        StopWatch stopWatch = StopWatch.create(IdUtil.randomUUID());
+        stopWatch.start();
+
+        try {
+            log.info("http get request {}, header {}", url, headers.toString());
+            HttpResponse execute = HttpUtil.createGet(url).headerMap(headers, true).timeout(TIME_OUT).execute();
+            String body = execute.body();
+            log.info("http get response {}, result {}", url, body.substring(0, Math.min(body.length(), 1000)));
+            return body;
+        } catch (Exception e) {
+            throw new HttpServerException(e.getMessage(), e);
+        } finally {
+            stopWatch.stop();
+            long millis = stopWatch.getLastTaskTimeMillis();
+            if (millis > TimeUnit.SECONDS.toMillis(1)) {
+                log.warn("Http {} cost {} ms.", url, millis);
+            }
+        }
+    }
+
+    public byte[] getBytes(String url) {
+        Map<String, String> headers = new HashMap<>(8);
+        headers.put("wind.sessionid", InjectVariable.getUserSessionId());
+        StopWatch stopWatch = StopWatch.create(IdUtil.randomUUID());
+        stopWatch.start();
+        try {
+            log.info("http get request {}, header {}", url, headers.toString());
+            HttpResponse execute = HttpUtil.createGet(url).headerMap(headers, true).timeout(TIME_OUT).execute();
+            byte[] body = execute.bodyBytes();
+            log.info("http get response {}, result length {}", url, body.length);
+            return body;
+        } catch (Exception e) {
+            throw new HttpServerException(e.getMessage(), e);
+        } finally {
+            stopWatch.stop();
+            long millis = stopWatch.getLastTaskTimeMillis();
+            if (millis > TimeUnit.SECONDS.toMillis(1)) {
+                log.warn("Http {} cost {} ms.", url, millis);
+            }
+        }
+    }
+
+    public String upload(String url, String filename, byte[] fileBytes) {
+
+        Map<String, String> headers = new HashMap<>(8);
+        String userSessionId = InjectVariable.getUserSessionId();
+        if (SpringProfileUtils.devProfile()) userSessionId = "add866692c9c4ed2b3e2a169355e7432";
+        headers.put("wind.sessionid", userSessionId);
+        StopWatch stopWatch = StopWatch.create(IdUtil.randomUUID());
+        stopWatch.start();
+
+        try {
+            log.info("http post request {}, parameter {}, header {}", url, filename.substring(0, Math.min(filename.length(), 1000)), headers.toString());
+            HttpResponse execute = HttpUtil.createPost(url).headerMap(headers, true).form("file", fileBytes, filename).timeout(TIME_OUT).execute();
+            String body = execute.body();
+            log.info("http post response {}, result {}", url, body.substring(0, Math.min(body.length(), 1000)));
+            return body;
+        } catch (Exception e) {
+            throw new HttpServerException(e.getMessage(), e);
+        } finally {
+            stopWatch.stop();
+            long millis = stopWatch.getLastTaskTimeMillis();
+            if (millis > TimeUnit.SECONDS.toMillis(1)) {
+                log.warn("Http {} cost {} ms.", url, millis);
+            }
+        }
+    }
+
+    public String uploadWithParams(String url, byte[] fileBytes, String fileName) {
+
+        Map<String, String> headers = new HashMap<>(8);
+        String userSessionId = InjectVariable.getUserSessionId();
+        if (SpringProfileUtils.devProfile() && needDevSession(url)) userSessionId = "d811d590f72541de8308131e3ccb7a39";
+        headers.put("wind.sessionid", userSessionId);
+        headers.put("Content-Type", "multipart/form-data");
+
+        StopWatch stopWatch = StopWatch.create(IdUtil.randomUUID());
+        stopWatch.start();
+
+        try {
+            log.info("http post request {}, file {}, header {} , fileName {}", url, fileBytes.length, headers.toString(), fileName);
+            HttpResponse execute = HttpUtil
+                    .createPost(url)
+                    .headerMap(headers, true)
+                    .form("upFile", fileBytes, fileName)
+                    .timeout(TIME_OUT)
+                    .execute();
+            String body = execute.body();
+            log.info("http post response {}, result {} , fileName {}", url, body.substring(0, Math.min(body.length(), 1000)), fileName);
+            return body;
+        } catch (Exception e) {
+            throw new HttpServerException(e.getMessage(), e);
+        } finally {
+            stopWatch.stop();
+            long millis = stopWatch.getLastTaskTimeMillis();
+            if (millis > TimeUnit.SECONDS.toMillis(1)) {
+                log.warn("Http {} cost {} ms.", url, millis);
+            }
+        }
+    }
+
+    @BuryingLog(apiUrl = "#{url}")
+    public String postWithToken(String url, String parameterString) {
+
+        Map<String, String> headers = new HashMap<>(8);
+        headers.put("Content-Type", "application/json;charset=utf-8");
+        headers.put("Accept", "application/json");
+        String token = InjectVariable.getUserSessionId();
+        if (SpringProfileUtils.devProfile())
+            token = "eyJpcCI6IjEwLjEwMC40LjMxIiwidXNlciI6ImZsbGl1LmJlbGFiYW4iLCJ0b2tlbiI6ImRNSVp4UGIwMHduV0thVlJjNDFUIiwiY3QiOjE3MDcwMTI1ODQyNjh9";
+        headers.put("token", token);
+
+        StopWatch stopWatch = StopWatch.create(IdUtil.randomUUID());
+        stopWatch.start();
+
+        try {
+            log.info("http post request {}, parameter {}, header {}", url, parameterString.substring(0, Math.min(parameterString.length(), 1000)), headers.toString());
+            HttpResponse execute = HttpUtil.createPost(url)
+                    .headerMap(headers, true).body(parameterString).timeout(TIME_OUT).execute();
+            String body = execute.body();
+            log.info("http post response {}, result {}", url, body.substring(0, Math.min(body.length(), 1000)));
+            return body;
+        } catch (Exception e) {
+            throw new HttpServerException(e.getMessage(), e);
+        } finally {
+            stopWatch.stop();
+            long millis = stopWatch.getLastTaskTimeMillis();
+            if (millis > TimeUnit.SECONDS.toMillis(1)) {
+                log.warn("Http {} cost {} ms.", url, millis);
+            }
+        }
+    }
+
+    public byte[] getBytes(String url, String session) {
+        Map<String, String> headers = new HashMap<>(8);
+//        headers.put("user-agent", "PostmanRuntime/7.29.2");
+        headers.put("wind.sessionid", session);
+//        headers.put("windsessionid", InjectVariable.getUserSessionId());
+
+        StopWatch stopWatch = StopWatch.create(IdUtil.randomUUID());
+        stopWatch.start();
+
+        try {
+            log.info("http get request {}, header {}", url, headers.toString());
+            HttpResponse execute = HttpUtil.createGet(url).headerMap(headers, true).timeout(TIME_OUT).execute();
+            byte[] body = execute.bodyBytes();
+            log.info("http get response {}, result length {}", url, body.length);
+            return body;
+        } catch (Exception e) {
+            throw new HttpServerException(e.getMessage(), e);
+        } finally {
+            stopWatch.stop();
+            long millis = stopWatch.getLastTaskTimeMillis();
+            if (millis > TimeUnit.SECONDS.toMillis(1)) {
+                log.warn("Http {} cost {} ms.", url, millis);
+            }
+        }
+    }
+
+    @BuryingLog(apiUrl = "#{url}")
+    public Response generalAigcV2(String url, String paramString) {
+        Response response = null;
+        log.info("AI汇总请求参数:{}", url);
+        try {
+            OkHttpClient client = new OkHttpClient.Builder()
+                    .connectTimeout(60, TimeUnit.SECONDS)
+                    .writeTimeout(60, TimeUnit.SECONDS)
+                    .readTimeout(60, TimeUnit.SECONDS)
+                    .build();
+            MediaType mediaType = MediaType.parse("application/json");
+            RequestBody body = RequestBody.create(mediaType, paramString);
+            Request okRequest = new Request.Builder()
+                    .url(url)
+                    .post(body)
+                    .addHeader("Content-Type", "application/json")
+                    .addHeader(WindConstants.SESSION_ID, InjectVariable.getUserSessionId())
+                    .build();
+            response = client.newCall(okRequest).execute();
+            log.info("getAliceStreamResponse#getResponse result={}", response);
+        } catch (IOException e) {
+            String errMsg = ExceptionUtils.stacktraceToString(e, 8);
+            log.error("canot acquire ext/event-stream response err:{}", errMsg);
+            throw new AliceProcessException("canot acquire ext/event-stream response errMsg:" + errMsg, null);
+        }
+        return response;
+    }
+
+    /**
+     * 异步请求
+     */
+    @BuryingLog(apiUrl = "#{url}")
+    public void post(List<String> resultTxtList, String url, String parameterString, String reidskey) {
+        Map<String, String> headers = new HashMap<>(8);
+        headers.put("Content-Type", "application/json;charset=utf-8");
+        headers.put("Accept", "application/json");
+        headers.put("Trace-ID", InjectVariable.getRequestId());
+        String userSessionId = InjectVariable.getUserSessionId();
+        if (SpringProfileUtils.devProfile() && needDevSession(url)) userSessionId = "d811d590f72541de8308131e3ccb7a39";
+        headers.put("wind.sessionid", userSessionId);
+        try {
+            log.info("http post request {}, parameter {}, header {}", url, parameterString, headers.toString());
+            HttpResponse execute = HttpUtil.createPost(url).setReadTimeout(600000).headerMap(headers, true).body(parameterString).timeout(TIME_OUT).execute();
+            String body = execute.body();
+            log.info("http post response {}, result {}", url, body.substring(0, Math.min(body.length(), 1000)));
+
+            JSONObject responseJson = JSONObject.parseObject(body);
+            String answer = responseJson.getJSONObject("body").getJSONArray("choices").getJSONObject(0).getJSONObject("message").getString("content");
+            if (StringUtils.isNotEmpty(answer)) {
+                resultTxtList.add(answer);
+                if (StringUtils.isNotEmpty(reidskey)) {
+                    log.info("异步请求 post Reidskey:{}", reidskey);
+                    redisManager.set(reidskey, answer, REDIS_TTL);
+                }
+            }
+            // return body;
+        } catch (Exception e) {
+            throw new HttpServerException(e.getMessage(), e);
+        }
+    }
+
+
+    @BuryingLog(apiUrl = "#{url}")
+    public String post3C(String url, String parameterString) {
+        Map<String, String> headers = new HashMap<>(8);
+        headers.put("Content-Type", "application/json;charset=utf-8");
+        headers.put("Accept", "application/json");
+        headers.put("Trace-ID", InjectVariable.getRequestId());
+        headers.put("wind-language", InjectVariable.getLanguage());
+        headers.put("usertoken", InjectVariable.getUserToken());
+        StopWatch stopWatch = StopWatch.create(IdUtil.randomUUID());
+        stopWatch.start();
+        try {
+            log.info("http post request {}, parameter {}, header {}", url, parameterString, headers.toString());
+            HttpResponse execute = HttpUtil.createPost(url).setReadTimeout(600000).headerMap(headers, true).body(parameterString).timeout(TIME_OUT).execute();
+            String body = execute.body();
+            log.info("http post response {}, result {}", url, body.substring(0, Math.min(body.length(), 1000)));
+            return body;
+        } catch (Exception e) {
+            throw new HttpServerException(e.getMessage(), e);
+        } finally {
+            stopWatch.stop();
+            long millis = stopWatch.getLastTaskTimeMillis();
+            if (millis > TimeUnit.SECONDS.toMillis(1)) {
+                log.warn("Http {} cost {} ms.", url, millis);
+            }
+        }
+    }
+
+    /**
+     * 异步请求
+     */
+    @BuryingLog(apiUrl = "#{url}")
+    public void postTimeOut(List<String> resultTxtList, String url, String parameterString, String reidskey) {
+        Map<String, String> headers = new HashMap<>(8);
+        headers.put("Content-Type", "application/json;charset=utf-8");
+        headers.put("Accept", "application/json");
+        headers.put("Trace-ID", InjectVariable.getRequestId());
+        String userSessionId = InjectVariable.getUserSessionId();
+        if (SpringProfileUtils.devProfile() && needDevSession(url)) userSessionId = "d811d590f72541de8308131e3ccb7a39";
+        headers.put("wind.sessionid", userSessionId);
+        try {
+            log.info("http postTimeOutt request {}, parameter {}, header {}", url, parameterString, headers.toString());
+            HttpResponse execute = HttpUtil.createPost(url).setReadTimeout(700000).headerMap(headers, true).body(parameterString).timeout(110000).execute();
+            String body = execute.body();
+            log.info("http postTimeOutt response {}, result {}", url, body.substring(0, Math.min(body.length(), 1000)));
+
+            JSONObject responseJson = JSONObject.parseObject(body);
+            String answer = responseJson.getJSONObject("body").getJSONArray("choices").getJSONObject(0).getJSONObject("message").getString("content");
+            if (StringUtils.isNotEmpty(answer)) {
+                resultTxtList.add(answer);
+                if (StringUtils.isNotEmpty(reidskey)) {
+                    log.info("异步请求 post Reidskey:{}", reidskey);
+                    redisManager.set(reidskey, answer, REDIS_TTL);
+                }
+            }
+        } catch (Exception e) {
+            throw new HttpServerException(e.getMessage(), e);
+        }
+    }
+
+    /**
+     * 异步请求
+     */
+    @BuryingLog(apiUrl = "#{url}")
+    public void postTimeOut(List<String> resultTxtList, String url, String parameterString, String reidskey, String timeout) {
+        Map<String, String> headers = new HashMap<>(8);
+        headers.put("Content-Type", "application/json;charset=utf-8");
+        headers.put("Accept", "application/json");
+        headers.put("Trace-ID", InjectVariable.getRequestId());
+        String userSessionId = InjectVariable.getUserSessionId();
+        if (SpringProfileUtils.devProfile() && needDevSession(url)) userSessionId = "d811d590f72541de8308131e3ccb7a39";
+        headers.put("wind.sessionid", userSessionId);
+        try {
+            log.info("http postTimeOutt request {}, parameter {}, header {}", url, parameterString, headers);
+            HttpResponse execute = HttpUtil.createPost(url).setReadTimeout(Integer.valueOf(timeout)).headerMap(headers, true).body(parameterString).timeout(Integer.valueOf(timeout)).execute();
+            String body = execute.body();
+            log.info("http postTimeOutt response {}, result {}", url, body.substring(0, Math.min(body.length(), 1000)));
+
+            JSONObject responseJson = JSONObject.parseObject(body);
+            //String answer = responseJson.getJSONObject("body").getJSONArray("choices").getJSONObject(0).getJSONObject("message").getString("content");
+            String answer = "";
+            JSONArray choicesArray = responseJson.getJSONObject("body").getJSONArray("choices");
+            if (choicesArray != null && choicesArray.size() > 0) {
+                answer = choicesArray.getJSONObject(0).getJSONObject("message").getString("content");
+            }
+
+            //start 如果answer为空，则格式问题，用新格式匹配
+            if (StrUtil.isEmpty(answer)) {
+                HttpAnswerResponse responseBean = JSONObject.parseObject(responseJson.toString(), HttpAnswerResponse.class);
+                HttpAnswerResponse.Body.Content[] content = responseBean.getBody().getContent();
+                if (content.length > 0) {
+                    answer = content[0].getText();
+                }
+            }
+            //end
+
+            if (StringUtils.isNotEmpty(answer)) {
+                resultTxtList.add(answer);
+                if (StringUtils.isNotEmpty(reidskey)) {
+                    log.info("异步请求 post Reidskey:{}", reidskey);
+                    redisManager.set(reidskey, answer, REDIS_TTL);
+                }
+            }
+        } catch (Exception e) {
+            throw new HttpServerException(e.getMessage(), e);
+        }
+    }
+
+    //---------------------------------------------------------------
+    @BuryingLog(apiUrl = "/docVector/v1/exists")
+    public String getNewsVectorStatus(String url) {
+        Map<String, String> headers = new HashMap<>(8);
+        headers.put("wind.sessionid", InjectVariable.getUserSessionId());
+        headers.put("X-App-Id", "Wind.Stock.AIresearch.Framework");
+        headers.put("trace_src", "Wind.Stock.AIresearch.Framework");
+        headers.put("trace_id", InjectVariable.getRequestId());
+        StopWatch stopWatch = StopWatch.create(IdUtil.randomUUID());
+        stopWatch.start();
+
+        try {
+            log.info("http get request {}, header {}", url, headers.toString());
+            HttpResponse execute = HttpUtil.createGet(url).headerMap(headers, true).timeout(TIME_OUT).execute();
+            String body = execute.body();
+            log.info("http get response {}, result {}", url, body.substring(0, Math.min(body.length(), 1000)));
+            return body;
+        } catch (Exception e) {
+            //mailUtils.sendMail("检查是否向量化接口异常"+url,e.getMessage(),"docRecall");
+            throw new HttpServerException(e.getMessage(), e);
+        } finally {
+            stopWatch.stop();
+            long millis = stopWatch.getLastTaskTimeMillis();
+            if (millis > TimeUnit.SECONDS.toMillis(1)) {
+                log.warn("Http {} cost {} ms.", url, millis);
+            }
+        }
+    }
+
+    @BuryingLog(apiUrl = "/docVector/v1/exists-fulltext")
+    public String getNewsContentVectorStatus(String url) {
+        Map<String, String> headers = new HashMap<>(8);
+        headers.put("wind.sessionid", InjectVariable.getUserSessionId());
+        headers.put("X-App-Id", "Wind.Stock.AIresearch.Framework");
+        headers.put("trace_src", "Wind.Stock.AIresearch.Framework");
+        headers.put("trace_id", InjectVariable.getRequestId());
+        StopWatch stopWatch = StopWatch.create(IdUtil.randomUUID());
+        stopWatch.start();
+
+        try {
+            log.info("http get request {}, header {}", url, headers.toString());
+            HttpResponse execute = HttpUtil.createGet(url).headerMap(headers, true).timeout(TIME_OUT).execute();
+            String body = execute.body();
+            log.info("http get response {}, result {}", url, body.substring(0, Math.min(body.length(), 1000)));
+            return body;
+        } catch (Exception e) {
+            //mailUtils.sendMail("检查是否向量化接口异常"+url,e.getMessage(),"docRecall");
+            throw new HttpServerException(e.getMessage(), e);
+        } finally {
+            stopWatch.stop();
+            long millis = stopWatch.getLastTaskTimeMillis();
+            if (millis > TimeUnit.SECONDS.toMillis(1)) {
+                log.warn("Http {} cost {} ms.", url, millis);
+            }
+        }
+    }
+
+    //---------------------------------------------------------------
+    @BuryingLog(apiUrl = "/docVector/v1/retrieve")
+    public String getRetrieve(String url) {
+        Map<String, String> headers = new HashMap<>(8);
+        headers.put("wind.sessionid", InjectVariable.getUserSessionId());
+        headers.put("X-App-Id", "Wind.Stock.AIresearch.Framework");
+        headers.put("trace_src", "Wind.Stock.AIresearch.Framework");
+        headers.put("trace_id", InjectVariable.getRequestId());
+        StopWatch stopWatch = StopWatch.create(IdUtil.randomUUID());
+        stopWatch.start();
+
+        try {
+            log.info("http getRetrieve request {}, header {}", url, headers.toString());
+            HttpResponse execute = HttpUtil.createGet(url).headerMap(headers, true).timeout(TIME_OUT).execute();
+            String body = execute.body();
+            log.info("http getRetrieve response {}, result {}", url, body.substring(0, Math.min(body.length(), 1000)));
+            return body;
+        } catch (Exception e) {
+            //mailUtils.sendMail("检查是否向量化接口异常"+url,e.getMessage(),"docRecall");
+            throw new HttpServerException(e.getMessage(), e);
+        } finally {
+            stopWatch.stop();
+            long millis = stopWatch.getLastTaskTimeMillis();
+            if (millis > TimeUnit.SECONDS.toMillis(1)) {
+                log.warn("Http {} cost {} ms.", url, millis);
+            }
+        }
+    }
+
+
+}
