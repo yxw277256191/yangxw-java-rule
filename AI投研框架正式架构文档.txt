@@ -1,0 +1,545 @@
+# AI投研框架正式架构文档
+
+## 1. 文档概述
+
+### 1.1 文档目的
+
+本文档用于说明 AI 投研框架系统的建设背景、系统职责、总体架构、核心业务流程、接口分组、数据架构、调度机制、配置依赖和测试关注点，为业务评审、产品验收、测试设计和项目交付提供统一参考。
+
+### 1.2 适用对象
+
+本文档主要面向：
+
+| 对象 | 关注重点 |
+|---|---|
+| 业务人员 | 系统解决什么业务问题，主流程如何运转 |
+| 产品人员 | 功能边界、页面能力、接口分组和数据含义 |
+| 测试人员 | 主流程测试、接口测试、数据一致性、异常场景 |
+| 项目评审人员 | 总体架构、外部依赖、关键风险和交付完整性 |
+
+### 1.3 覆盖范围
+
+本文档覆盖 AI 投研框架主链路：
+
+- 研报筛选
+- 文档向量化与召回
+- AIGC 单篇生成
+- 公司级汇总
+- 聚合/挂树
+- 发布
+- 增量数据处理
+- 任务调度
+- 核心接口分组
+- MongoDB、MySQL、Redis 数据用途
+
+图片指标、指标抽取、开放接口等相关能力在本文档中只做边界说明，不展开为独立架构。
+
+### 1.4 相关文档
+
+| 文档 | 说明 |
+|---|---|
+| `design/architecture/AI投研框架架构文档.md` | 现有架构草稿文档 |
+| `design/storage/MongoDB表结构说明.md` | MongoDB 集合、字段、关系和流程图说明 |
+| `design/storage/投研框架-预览表.sql` | MySQL 预览表结构 |
+| `design/流程梳理文档.txt` | 早期流程梳理内容 |
+| `design/architecture/投研框架-主体流程图.png` | 主流程图 |
+| `design/architecture/投研框架-查询流程图.png` | 查询流程图 |
+| `design/architecture/AI投研框架调度流程图.png` | 调度流程图 |
+
+## 2. 系统背景与目标
+
+### 2.1 业务背景
+
+投研工作需要从大量研报、年报和自有文档中提取公司研究信息，并形成结构化、可复用、可发布的投研框架内容。传统人工处理存在效率低、覆盖不稳定、版本难追踪、内容复用困难等问题。
+
+AI 投研框架通过研报筛选、文档召回、AIGC 内容生成、公司级汇总和版本发布，将非结构化文档加工为结构化投研内容，为后续展示、检索、复核和发布提供基础能力。
+
+### 2.2 系统建设目标
+
+| 目标 | 说明 |
+|---|---|
+| 提升处理效率 | 自动完成研报筛选、任务生成、AIGC 生成、汇总和发布 |
+| 统一内容结构 | 将模型输出拆分为可排序、可维护、可发布的树形节点 |
+| 支持批量处理 | 支持按公司批量生成、汇总、发布 |
+| 支持状态追踪 | 通过任务状态、公司概览状态、发布版本追踪处理进度 |
+| 支持版本管理 | 发布内容保留当前版本、历史版本和版本元数据 |
+| 支持测试验证 | 对主流程、接口、调度、数据一致性提供清晰验证点 |
+
+### 2.3 系统职责边界
+
+系统负责：
+
+- 管理投研框架主流程任务。
+- 查询和筛选研报数据。
+- 提交文档向量化与召回任务。
+- 调用 AIGC 服务生成内容。
+- 保存基础内容、预处理内容、发布内容和历史版本。
+- 提供页面所需的查询、维护、发布接口。
+- 执行定时调度和增量数据处理。
+
+系统不直接负责：
+
+- AIGC 模型本身的训练与部署。
+- 外部研报源数据生产。
+- 向量化服务内部实现。
+- 图片指标、开放接口等子域的完整业务说明。
+
+## 3. 总体架构
+
+### 3.1 总体架构说明
+
+AI 投研框架是基于 Java 17 和 Spring Boot 的后端服务。系统以 `/framework/*` 接口为主入口，核心业务逻辑集中在 `framework` 模块，依赖 MongoDB 保存 AIGC 任务和内容，依赖 MySQL 保存预览、映射和日志类数据，依赖 Redis 做调度锁、缓存和运行状态控制，并通过外部服务完成研报查询、文档召回、AIGC 生成和配置管理。
+
+### 3.2 系统总体架构图
+
+```mermaid
+flowchart LR
+    U["用户/页面<br/>AIResearchFrameworkWeb"]
+    C["接口层<br/>AIFrameworkController"]
+    S["业务服务层<br/>AIResearchService / OverviewService"]
+    J["调度层<br/>TaskAIresearchJob"]
+    M["MongoDB<br/>任务/内容/版本"]
+    SQL["MySQL<br/>预览/映射/日志"]
+    R["Redis<br/>锁/缓存/运行状态"]
+    A["Alice/AIGC<br/>模型生成"]
+    V["向量化与召回服务"]
+    O["Ocean/Expo<br/>研报/文档数据"]
+    P["Apollo<br/>配置开关"]
+
+    U --> C
+    C --> S
+    J --> S
+    S --> M
+    S --> SQL
+    S --> R
+    J --> R
+    S --> A
+    S --> V
+    S --> O
+    S --> P
+    J --> P
+```
+
+### 3.3 核心模块说明
+
+| 模块 | 主要职责 |
+|---|---|
+| 页面资源 | 提供投研框架管理、查询、发布、日志等前端页面 |
+| `AIFrameworkController` | 提供主流程相关接口 |
+| `AIResearchService` | 执行研报查询、AIGC 调用、内容保存、查询等能力 |
+| `OverviewService` | 执行概览数据、批量生成、汇总、发布相关能力 |
+| `TaskAIresearchJob` | 周期性扫描任务并推进主流程 |
+| `MongoDBService` | 封装 MongoDB 集合写入、查询、更新和删除 |
+| 外部客户端 | 调用 AIGC、召回、Ocean/Expo 等外部服务 |
+
+### 3.4 外部依赖说明
+
+| 外部依赖 | 用途 | 对主流程影响 |
+|---|---|---|
+| Alice/AIGC 服务 | 根据 Prompt 和输入内容生成框架、拆解、汇总、聚合结果 | 影响内容生成 |
+| 文档向量化与召回服务 | 将文档转换为可召回内容，并提供模型输入 | 影响 AIGC 输入质量 |
+| Ocean/Expo 服务 | 查询研报、文档、外部数据，支持文档解密等能力 | 影响数据来源 |
+| Apollo | 控制定时任务开关、用户上下文、模型参数等 | 影响运行配置 |
+| Redis | 调度锁、缓存、任务运行状态 | 影响多实例调度稳定性 |
+| SSO | 用户登录与鉴权 | 影响页面访问 |
+
+## 4. 核心业务流程
+
+### 4.1 主流程总览
+
+```mermaid
+flowchart TD
+    A["研报筛选<br/>按公司/机构/页数/时间/方案"]
+    B["文档提交<br/>向量化/召回任务"]
+    C["单篇 AIGC 生成<br/>框架/拆解/年报/自有文档"]
+    D["公司级汇总<br/>多篇结果汇总"]
+    E["聚合/挂树<br/>形成最终结构"]
+    F["发布<br/>当前版本/历史版本/版本记录"]
+    G["页面查询与验证<br/>列表/详情/日志/状态"]
+
+    A --> B --> C --> D --> E --> F --> G
+```
+
+### 4.2 研报筛选流程
+
+研报筛选用于确定某家公司需要参与 AI 投研框架生成的文档集合。系统按 `planType` 支持不同筛选方案。
+
+| 方案 | `planType` | 业务含义 |
+|---|---|---|
+| 方案一 | `1` | 公司研究，文档页码 20 到 200，优先查询国内机构调研数据或金牌分析师研报 |
+| 方案二 | `2` | 公司研究，文档页码 20 到 200，查询指定外资机构数据 |
+| 方案三 | `3` | 公司研究，文档页码 20 到 200，按最近年份补充查询 |
+| 方案四 | `4` | 最新年报链路 |
+
+测试重点：
+
+- 不同方案是否返回符合条件的文档。
+- 前置方案无数据时是否能走兜底方案。
+- 年报方案是否只处理年报类数据。
+- 公司代码、日期、页数、机构条件是否生效。
+
+### 4.3 文档向量化与召回流程
+
+文档向量化与召回流程用于为 AIGC 生成准备输入内容。
+
+```mermaid
+flowchart TD
+    A["生成提交任务<br/>tb_aigc_submit_task"]
+    B["定时扫描未开始任务"]
+    C["调用向量化/召回服务"]
+    D{"提交是否成功"}
+    E["更新为完成"]
+    F["更新重试次数/异常状态"]
+
+    A --> B --> C --> D
+    D -->|成功| E
+    D -->|失败| F
+```
+
+### 4.4 AIGC 单篇生成流程
+
+单篇 AIGC 生成根据任务的 `nodeType` 和 `promptId` 生成基础内容，并写入 MongoDB。
+
+| 类型 | 说明 | 主要 Prompt |
+|---|---|---|
+| 框架生成 | 对单篇研报生成投研框架内容 | `P042185` |
+| 年报生成 | 对年报生成框架内容 | `P050156` |
+| 自有文档 | 对用户自有文档生成框架内容 | `P045503` |
+| 研报拆解 | 对文档内容做拆解与合并 | `P042253`、`P042848` |
+
+生成结果按 Markdown 或模型输出拆分为节点，保存到 `tb_aigc_base`。
+
+### 4.5 公司级汇总流程
+
+公司级汇总读取公司下已完成的单篇 AIGC 内容，按公司维度生成汇总结果，保存到 `tb_aigc_preproc`。
+
+```mermaid
+flowchart TD
+    A["查询已完成单篇结果<br/>tb_aigc_base"]
+    B["按 windCode 分组"]
+    C["调用汇总 Prompt"]
+    D["写入预处理集合<br/>tb_aigc_preproc"]
+    E["更新公司概览状态"]
+
+    A --> B --> C --> D --> E
+```
+
+### 4.6 聚合/挂树流程
+
+聚合/挂树流程将框架、拆解、指标或中间结果进一步组织为最终展示结构。主流程中聚合结果作为发布前的重要内容来源。
+
+测试重点：
+
+- 聚合是否只使用已完成的上游结果。
+- 缺少部分输入内容时是否有明确状态或错误信息。
+- 聚合结果节点层级和顺序是否正确。
+
+### 4.7 发布流程
+
+发布流程将预处理内容写入正式发布集合，并维护历史版本和版本记录。
+
+```mermaid
+flowchart TD
+    A["预处理内容<br/>tb_aigc_preproc"]
+    B["发布操作"]
+    C["当前发布内容<br/>tb_aigc_release"]
+    D["历史发布内容<br/>tb_aigc_release_history"]
+    E["发布版本记录<br/>tb_aigc_release_version"]
+    F["更新公司概览<br/>publishVersion / publishDate"]
+
+    A --> B
+    B --> C
+    B --> D
+    B --> E
+    B --> F
+```
+
+### 4.8 增量数据处理流程
+
+增量任务按时间窗口扫描新增数据，并按默认任务类型生成后续处理任务。该流程用于持续处理新进入系统的研报或文档。
+
+## 5. 接口分组说明
+
+主流程接口集中在 `/framework/*`，接口文档可在后续单独展开。本文档按业务能力说明接口分组。
+
+### 5.1 研报查询与列表接口
+
+| 接口 | 说明 |
+|---|---|
+| `POST /framework/list` | 查询研报列表 |
+| `POST /framework/v2/list` | 查询新版研报列表 |
+| `POST /framework/submitList` | 查询并提交研报列表 |
+| `POST /framework/getResearchReportList` | 查询公司级处理概览 |
+| `POST /framework/getOverviewPageList` | 分页查询预览/概览数据 |
+| `POST /framework/getOverviewCount` | 查询概览统计数量 |
+
+### 5.2 任务提交接口
+
+| 接口 | 说明 |
+|---|---|
+| `POST /framework/submitListTask` | 生成待处理 AIGC 任务 |
+| `POST /framework/submit` | 提交单个文档处理任务 |
+| `POST /framework/submitBatch` | 批量提交任务 |
+| `POST /framework/getAiGcTask` | 查询 AIGC 任务 |
+| `POST /framework/getAiGcTaskByPage` | 分页查询 AIGC 任务 |
+| `POST /framework/getSubmitTaskList` | 查询向量化提交任务 |
+| `POST /framework/updateSubmitTask` | 更新提交任务 |
+| `POST /framework/removeSubmitTask` | 删除提交任务 |
+
+### 5.3 AIGC 生成接口
+
+| 接口 | 说明 |
+|---|---|
+| `POST /framework/aigc` | 流式 AIGC 生成 |
+| `POST /framework/aigcRe` | 重新生成 |
+| `POST /framework/aigcNoStream` | 非流式 AIGC 生成 |
+| `POST /framework/aigcNoStreamRe` | 非流式重新生成 |
+| `POST /framework/aigcBaseByType` | 按类型查询或生成基础内容 |
+| `POST /framework/aigcBaseBatch` | 批量生成基础 AIGC 内容 |
+
+### 5.4 预处理与汇总接口
+
+| 接口 | 说明 |
+|---|---|
+| `POST /framework/aigcRcPreBatch` | 批量执行框架汇总 |
+| `POST /framework/aigcRcPreBatchNewData` | 对增量数据执行框架汇总 |
+| `POST /framework/getAigcPreByType` | 按类型查询预处理内容 |
+| `POST /framework/getAiGcPreproc` | 查询预处理集合数据 |
+| `POST /framework/getAiGcPreTxt` | 查询预处理文本 |
+| `POST /framework/betweenTreeNoStream` | 聚合中间流程 |
+| `POST /framework/hangTreeAigc` | 流式聚合/挂树 |
+| `POST /framework/hangTreeAigcNoStream` | 非流式聚合/挂树 |
+
+### 5.5 发布接口
+
+| 接口 | 说明 |
+|---|---|
+| `POST /framework/publishRelease` | 单个发布 |
+| `POST /framework/publishReleaseBatch` | 批量发布 |
+| `POST /framework/getAigcReleaseByType` | 按类型查询发布内容 |
+| `POST /framework/findAigcReleaseByType` | 查询已发布内容 |
+| `POST /framework/getAiGcReleaseAll` | 查询全部发布内容 |
+| `POST /framework/versionChange` | 切换或调整版本 |
+
+### 5.6 数据维护接口
+
+| 接口 | 说明 |
+|---|---|
+| `POST /framework/cleanCache` | 清理缓存 |
+| `POST /framework/cleanALL` | 清理全部相关数据 |
+| `POST /framework/cleanTask` | 清理任务 |
+| `POST /framework/saveBase` | 保存基础内容 |
+| `POST /framework/saveBatch` | 批量保存 |
+| `POST /framework/importExcel` | 导入 Excel |
+| `POST /framework/qualityInspection` | 质量检查 |
+| `POST /framework/mappingPageList` | 分页查询公司映射 |
+| `POST /framework/mappingList` | 查询公司映射 |
+| `POST /framework/mappingSave` | 保存公司映射 |
+| `POST /framework/mappingDelete` | 删除公司映射 |
+| `POST /framework/overviewSync` | 同步概览数据 |
+| `POST /framework/overviewDelete` | 删除概览数据 |
+| `POST /framework/deleteResearchReport` | 删除公司级处理记录 |
+
+## 6. 数据架构
+
+### 6.1 数据存储总览
+
+| 存储 | 主要用途 |
+|---|---|
+| MongoDB | AIGC 任务、基础内容、预处理内容、发布内容、历史版本、提交任务 |
+| MySQL | 预览数据、公司映射、操作日志等结构化业务数据 |
+| Redis | 调度锁、缓存、任务运行标记、部分配置缓存 |
+
+### 6.2 MongoDB 集合流转图
+
+```mermaid
+flowchart TD
+    A["tb_research_report<br/>公司处理状态"]
+    B["tb_aigc_submit_task<br/>文档提交任务"]
+    C["tb_aigc_task<br/>AIGC 任务"]
+    D["tb_aigc_base<br/>单篇基础内容"]
+    E["tb_aigc_preproc<br/>预处理/汇总内容"]
+    F["tb_aigc_release<br/>当前发布内容"]
+    G["tb_aigc_release_history<br/>历史发布内容"]
+    H["tb_aigc_release_version<br/>发布版本记录"]
+
+    A -->|"windCode"| B
+    B -->|"docId + windCode"| C
+    C -->|"docId + promptId + windCode + nodeType"| D
+    D -->|"windCode + promptId + nodeType"| E
+    E -->|"发布"| F
+    F -->|"publishVersion"| G
+    F -->|"publishVersion"| H
+    H -->|"发布版本"| A
+```
+
+### 6.3 MongoDB 集合说明
+
+| 集合 | 说明 |
+|---|---|
+| `tb_aigc_task` | AIGC 生成任务 |
+| `tb_aigc_submit_task` | 文档向量化/召回提交任务 |
+| `tb_research_report` | 公司级处理状态和版本信息 |
+| `tb_aigc_base` | 单篇 AIGC 基础节点内容 |
+| `tb_aigc_preproc` | 公司级预处理或汇总节点内容 |
+| `tb_aigc_release` | 当前正式发布内容 |
+| `tb_aigc_release_history` | 历史发布内容 |
+| `tb_aigc_release_version` | 发布版本记录 |
+| `tb_wind_code_map` | 证券代码或公司映射 |
+
+详细字段以 `design/storage/MongoDB表结构说明.md` 为准。
+
+### 6.4 MySQL 表说明
+
+| 表/Mapper | 说明 |
+|---|---|
+| `ResearchOverviewMapper` | 投研框架预览、状态、发布信息展示 |
+| `OperateLogMapper` | 页面操作日志 |
+| `MappingWindCodeMapper` | 公司和 Wind 代码映射维护 |
+
+详细字段以 `design/storage/投研框架-预览表.sql` 为准。
+
+### 6.5 Redis 用途说明
+
+| 用途 | 说明 |
+|---|---|
+| 调度锁 | 防止多实例重复执行同一调度任务 |
+| 运行标记 | 标记任务是否正在执行 |
+| 缓存 | 保存部分临时任务、用户上下文和配置 |
+| 异常恢复辅助 | 调度异常后可通过锁状态和任务状态定位问题 |
+
+## 7. 调度与任务机制
+
+### 7.1 调度任务总览
+
+| 调度任务 | 频率 | 主要职责 |
+|---|---|---|
+| `taskSubmitJob` | 每 2 分钟 | 扫描并提交文档向量化任务 |
+| `taskBaseAigcJob` | 每 3 分钟 | 执行常规单篇框架/拆解任务 |
+| `taskHangTreeAigcJob` | 每 15 分钟 | 执行聚合/挂树任务 |
+| `taskAigcRcJob` | 每 30 分钟 | 执行公司级框架汇总 |
+| `taskBaseAigcJob4` | 每 50 分钟 | 执行年报方案任务 |
+| `taskNewDataJob` | 每天 7 点 | 扫描增量数据并生成任务 |
+
+### 7.2 任务状态流转
+
+```mermaid
+stateDiagram-v2
+    [*] --> 未开始
+    未开始 --> 进行中
+    进行中 --> 完成
+    进行中 --> 异常
+    异常 --> 未开始: 人工重试或重新生成
+```
+
+| 状态值 | 含义 |
+|---:|---|
+| `0` | 未开始 |
+| `1` | 进行中 |
+| `2` | 完成 |
+| `3` | 异常 |
+
+### 7.3 Redis 锁与多实例控制
+
+定时任务执行前会读取 Redis 中的任务运行标记。如果标记表示任务正在执行，则当前实例跳过本轮调度；如果没有执行中标记，则设置锁标记并开始处理。任务结束后释放或重置标记。
+
+该机制用于降低多实例部署下重复处理同一批任务的风险。
+
+### 7.4 异常与重试机制
+
+系统通过任务状态、错误信息和重试次数记录任务执行结果。典型场景包括：
+
+- 文档提交失败后增加重试次数。
+- AIGC 调用失败后记录异常状态和错误信息。
+- 调度任务异常时通过日志、Redis 锁和任务状态定位问题。
+- 发布失败时需要核对预处理内容、发布集合和版本记录是否一致。
+
+## 8. 安全与配置
+
+### 8.1 登录与鉴权
+
+系统包含登录、SSO 回调、退出登录等接口。页面访问依赖用户身份信息，部分接口通过过滤器或白名单机制控制访问。
+
+### 8.2 Apollo 配置
+
+Apollo 用于控制调度开关、默认用户上下文、模型参数等运行配置。关键调度任务均支持通过 Apollo 开关启停。
+
+### 8.3 外部服务配置
+
+外部服务包括 AIGC、召回、Ocean/Expo、Redis、MySQL、MongoDB 等。测试和部署时需要确认不同环境配置是否正确隔离。
+
+## 9. 测试关注点
+
+### 9.1 主流程测试
+
+- 研报筛选到发布的完整链路是否可执行。
+- 不同 `planType` 是否进入正确处理方案。
+- 单篇生成、汇总、发布结果是否能在页面查询。
+
+### 9.2 接口测试
+
+- `/framework/*` 接口路径、请求方式、入参是否符合预期。
+- 批量接口在部分失败时是否保留成功结果。
+- 查询接口是否能按公司、状态、版本正确过滤。
+
+### 9.3 数据一致性测试
+
+- `tb_aigc_task` 与 `tb_aigc_base` 是否按 `docId + promptId + windCode + nodeType` 对应。
+- `tb_aigc_preproc` 发布后，`tb_aigc_release`、`tb_aigc_release_history`、`tb_aigc_release_version` 是否一致。
+- 公司概览状态是否与实际明细数据一致。
+
+### 9.4 调度任务测试
+
+- Apollo 开关关闭时任务不执行。
+- Redis 锁存在时任务不重复执行。
+- 任务异常后状态和错误信息可追踪。
+- 多实例部署时不会重复处理同一批数据。
+
+### 9.5 发布回归测试
+
+- 发布版本号是否正确生成或保存。
+- 重复发布同一公司时历史版本是否保留。
+- 版本切换后页面展示是否正确。
+- 发布失败时是否不会破坏已有正式版本。
+
+## 10. 风险与改进建议
+
+| 风险 | 影响 | 建议 |
+|---|---|---|
+| MongoDB 集合无外键约束 | 业务字段不一致会导致数据断链 | 增加关键组合字段校验和查询保护 |
+| 调度依赖 Redis 锁 | 锁未释放可能导致任务跳过 | 增加锁超时、异常恢复和监控告警 |
+| 外部 AIGC 服务不稳定 | 生成失败、超时或内容为空 | 增加重试、超时控制和失败重跑机制 |
+| 发布链路涉及多集合 | 当前版本、历史版本、版本记录可能不一致 | 发布操作增加一致性校验 |
+| 大批量处理耗时较长 | 影响调度周期和页面反馈 | 增加批次控制、分页处理和进度展示 |
+| 文档内容依赖 Prompt | Prompt 变化会影响输出结构 | 建立 Prompt 版本说明和回归样例 |
+
+## 11. 附录
+
+### 11.1 现有架构图与流程图
+
+- [投研框架-主体流程图.png](投研框架-主体流程图.png)
+- [投研框架-查询流程图.png](投研框架-查询流程图.png)
+- [AI投研框架调度流程图.png](AI投研框架调度流程图.png)
+
+### 11.2 关键状态码
+
+| 状态值 | 含义 |
+|---:|---|
+| `0` | 未开始 |
+| `1` | 进行中 |
+| `2` | 完成 |
+| `3` | 异常 |
+
+### 11.3 关键 Prompt 说明
+
+| Prompt | 说明 |
+|---|---|
+| `P042185` | 框架生成，单篇研报 |
+| `P050156` | 框架生成，年报 |
+| `P045503` | 框架生成，自有文档 |
+| `P042256` | 框架生成，汇总 |
+| `P042253` | 拆解，单篇 |
+| `P042848` | 拆解，单篇合并 |
+| `P042254` | 拆解，汇总 |
+| `P042255` | 聚合/挂树，汇总 |
+| `P050620` | 指标结果汇总相关 |
