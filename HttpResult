@@ -1,0 +1,52 @@
+package cn.com.wind.stock.common.base;
+
+import lombok.Data;
+import java.io.Serializable;
+
+@Data
+public class HttpResult<T> implements Serializable {
+
+    private static final long serialVersionUID = -958179639943650521L;
+    private Integer code;
+    private Boolean success;
+    private String msg;
+    private T data;
+
+    public HttpResult() {
+    }
+
+    public static <T> HttpResult<T> ok(T data) {
+        HttpResult<T> httpResult = new HttpResult<>();
+        httpResult.setCode(200);
+        httpResult.setSuccess(true);
+        httpResult.setData(data);
+        httpResult.setMsg("success");
+        return httpResult;
+    }
+
+    public static <T> HttpResult<T> ok() {
+        HttpResult<T> httpResult = new HttpResult<>();
+        httpResult.setCode(200);
+        httpResult.setSuccess(true);
+        httpResult.setMsg("success");
+        return httpResult;
+    }
+
+    public static <T> HttpResult<T> fail(Integer code, String msg) {
+        HttpResult<T> httpResult = new HttpResult<>();
+        httpResult.setCode(code);
+        httpResult.setSuccess(false);
+        httpResult.setMsg(msg);
+        return httpResult;
+    }
+
+    public static <T> HttpResult<T> build(T data, Integer code, Boolean success, String msg) {
+        HttpResult<T> httpResult = new HttpResult<>();
+        httpResult.setData(data);
+        httpResult.setCode(code);
+        httpResult.setSuccess(success);
+        httpResult.setMsg(msg);
+        return httpResult;
+    }
+
+}
