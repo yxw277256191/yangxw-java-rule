@@ -1,0 +1,440 @@
+# Wind.Stock.ReaderRuleManager.Service 业务架构说明
+
+> 本文档面向业务、产品、测试人员，说明规则管理服务的系统定位、功能边界、核心流程、接口分组和数据模型含义。接口字段和完整请求响应示例以 `design/api/规则管理-接口文档_整理版.md` 为准，数据库字段细节以 `design/storage/MySql 数据存储设计方案.md` 为准。
+
+---
+
+## 1. 文档目的
+
+`Wind.Stock.ReaderRuleManager.Service` 是智读规则管理服务，用于集中维护 SmartRead、DataProcess 等业务系统使用的 Prompt 和规则映射配置。
+
+本文档用于回答以下问题：
+
+- 这个系统负责什么，不负责什么。
+- 业务人员可以通过系统维护哪些数据。
+- 测试人员应该按哪些业务流程和接口分组设计用例。
+- 规则、Prompt、日志等数据表分别承载什么业务含义。
+- 系统依赖哪些外部服务和运行环境。
+
+---
+
+## 2. 系统定位
+
+本服务定位为“智读规则配置中心”。它不直接执行研报、公告或股票数据加工，而是维护业务系统在智能阅读场景中需要使用的规则和 Prompt 配置。
+
+系统主要提供两类能力：
+
+1. 后台管理能力：供管理页面维护 Prompt、规则、上下架状态、导入导出数据和查看操作日志。
+2. 对外查询能力：供 SmartRead、DataProcess 等业务服务按业务编码和条件查询已配置的规则和 Prompt。
+
+系统的核心价值是把原本分散在业务系统或 Excel 中的规则配置集中管理，并通过统一接口提供给调用方。
+
+---
+
+## 3. 使用角色与外部系统
+
+### 3.1 使用角色
+
+| 角色 | 主要诉求 | 相关功能 |
+|---|---|---|
+| 业务配置人员 | 维护 Prompt、规则和规则条件 | Prompt 管理、规则管理、导入导出 |
+| 产品人员 | 理解系统支持的规则配置能力和流程 | 功能模块、业务流程、数据模型 |
+| 测试人员 | 验证规则维护、查询、同步、权限和日志 | 接口分组、测试关注点 |
+| 外部业务系统 | 按业务场景查询规则和 Prompt | 对外查询接口 |
+
+### 3.2 外部系统
+
+| 外部系统或组件 | 作用 |
+|---|---|
+| SmartRead / Wind.Stock.Chat.SmartReader | 通过规则查询接口获取业务编码对应的规则配置和 Prompt |
+| Wind.Stock.Data.Process | 通过规则查询接口获取数据处理场景需要的规则配置 |
+| SSO | 提供管理端登录认证和扫码回调 |
+| PMP Prompt 平台 | 提供 Prompt 描述信息同步来源 |
+| MySQL | 持久化 Prompt、规则、规则条件和操作日志 |
+| Redis | 存储登录用户和 token 等会话信息 |
+| Apollo | 提供环境化配置，例如 SSO、Prompt 同步地址、权限账号等 |
+| 静态前端页面 | 提供规则管理后台页面入口 |
+
+---
+
+## 4. 功能模块划分
+
+### 4.1 登录与权限模块
+
+登录模块负责 SSO 扫码登录、回调验签、登录状态查询和登出。用户登录成功后，系统会缓存登录用户信息，并将 token 写入响应头和 Cookie。
+
+权限控制的重点是管理端访问。系统存在若干无需登录即可访问的接口，例如健康检查、对外查询接口、数据同步接口、导入导出接口、日志接口和 Swagger 文档接口。测试时需要区分“管理端页面操作”和“外部系统接口调用”两种访问方式。
+
+### 4.2 Prompt 管理模块
+
+Prompt 管理模块维护 `Prompt ID`、Prompt 名称、Prompt 内容、来源类型、产品类型、市场、公告类型等信息。
+
+业务上，Prompt 是规则最终指向的文本模板或智能阅读指令。规则管理中配置的 `promptId` 必须能在 Prompt 映射表中找到，否则新增或修改规则会返回业务校验失败信息。
+
+主要能力包括：
+
+- Prompt 分页查询和批量查询。
+- Prompt 新增、修改、删除。
+- Prompt Excel 导入导出。
+- 从 PMP 平台同步 Prompt 描述。
+- 查询 Prompt 下拉筛选项。
+
+### 4.3 规则管理模块
+
+规则管理模块维护业务编码与 Prompt 的映射关系，并支持给一条规则配置多个条件。
+
+业务上，一条规则通常表示：
+
+- 某个 `businessCode` 业务编码。
+- 该业务编码命中的一个或多个 `promptId`。
+- 可选的条件集合，例如 `windCode`、`lan`、`title` 等字段及其操作符和值。
+- 上架或下架状态。
+
+主要能力包括：
+
+- 规则分页查询和对外查询。
+- 规则新增、修改、删除。
+- 规则上下架。
+- 规则 Excel 导入导出。
+- 从原始映射表同步规则到正式规则表。
+
+### 4.4 操作日志模块
+
+操作日志模块记录带有 `@OperateLogAop` 注解的管理操作，包括操作菜单、操作类型、请求参数、IP、执行状态和操作时间。
+
+该模块面向审计和问题追踪，支持日志分页查询、操作菜单查询、操作类型查询、日志导出和日志删除。系统还配置了定时任务，按时间清理历史日志。
+
+### 4.5 数据导入导出模块
+
+系统支持通过 Excel 批量维护 Prompt 和规则。
+
+导入导出能力适合以下场景：
+
+- 初始规则批量导入。
+- 业务人员线下整理后批量更新。
+- 测试人员构造或备份规则数据。
+- 生产问题排查时导出当前配置。
+
+需要注意：规则导入会进行 Prompt 存在性校验。部分导入流程可能覆盖或重建规则正式表数据，测试和生产操作前需要确认影响范围。
+
+---
+
+## 5. 核心业务流程
+
+### 5.1 管理端登录流程
+
+```mermaid
+flowchart TD
+    A[用户访问管理页面] --> B[跳转或请求生成 SSO 地址]
+    B --> C[用户扫码登录]
+    C --> D[SSO 回调 /auth/ssoCallBack]
+    D --> E{账号、时间戳、签名校验}
+    E -- 通过 --> F[缓存登录用户和 token]
+    F --> G[写入响应头和 Cookie]
+    G --> H[跳转管理端页面]
+    E -- 不通过 --> I[返回错误信息和 SSO 地址]
+```
+
+测试关注点：
+
+- 未登录访问受保护页面时应返回未授权信息。
+- SSO 回调缺少账号、签名或时间戳时应失败。
+- 未在 Apollo 白名单中的账号应无法登录。
+- 登录成功后 `/login` 应能查询到登录状态。
+- 登出后登录状态应失效。
+
+### 5.2 Prompt 维护流程
+
+```mermaid
+flowchart TD
+    A[业务配置人员新增或导入 Prompt] --> B[系统按 promptId 判断是否已存在]
+    B -- 不存在 --> C[新增 Prompt]
+    B -- 已存在 --> D[更新 Prompt]
+    C --> E[规则维护时可引用该 promptId]
+    D --> E
+```
+
+测试关注点：
+
+- 新增 Prompt 时必填字段校验。
+- 重复 `promptId` 的处理方式。
+- Prompt 被规则引用时不允许删除。
+- Excel 导入后字段是否正确落库。
+- 从 PMP 同步后 Prompt 名称、描述、内容是否按预期更新。
+
+### 5.3 规则维护流程
+
+```mermaid
+flowchart TD
+    A[业务配置人员新增或修改规则] --> B[填写 businessCode、promptId、条件和状态]
+    B --> C{promptId 是否存在于 Prompt 映射表}
+    C -- 否 --> D[返回业务校验失败信息]
+    C -- 是 --> E{规则是否已存在}
+    E -- 不存在 --> F[写入规则主表]
+    F --> G[写入规则条件子表]
+    E -- 已存在 --> H[更新规则主表]
+    H --> I[删除旧条件并写入新条件]
+```
+
+测试关注点：
+
+- `promptId` 不存在时，应返回业务失败信息。
+- 新增规则时主表和子表是否同时生成。
+- 修改规则时旧条件是否被替换。
+- 删除规则时主表和子表是否同时删除。
+- 上架状态 `0` 与下架状态 `1` 是否符合查询预期。
+
+### 5.4 外部系统查询规则流程
+
+```mermaid
+flowchart TD
+    A[SmartRead / DataProcess] --> B[POST /readerRule/ruleManage/getRuleManageList]
+    B --> C[进入 ReaderRuleManager.Service]
+    C --> D{TokenFilter 排除路径匹配}
+    D -- 命中 getRuleManageList 白名单 --> E[跳过 SSO / Token 校验]
+    D -- 未命中白名单 --> F[执行 SSO / Token 校验]
+    E --> G[RuleManagerController.getRuleManageList]
+    F --> G
+    G --> H{businessCode 是否为空}
+    H -- 是 --> I[返回空列表]
+    H -- 否 --> J[RuleManageService 查询上架规则 status = 0]
+    J --> K[查询 tb_rule_manage 主表]
+    K --> L[查询 tb_rule_manage_sub 条件子表]
+    L --> M{请求是否包含 ruleSubList 条件}
+    M -- 否 --> N[返回 businessCode 下全部上架规则]
+    M -- 是 --> O[按 key1 和 value1 过滤命中条件]
+    O --> P[组装规则主信息和条件列表]
+    N --> P
+    P --> Q[返回 SmartRead / DataProcess]
+    I --> Q
+```
+
+测试关注点：
+
+- `businessCode` 为空时返回空结果。
+- 单个和多个 `businessCode` 查询结果是否正确。
+- 只返回上架状态规则。
+- 传入条件时是否只返回命中的规则。
+- 条件值支持中文逗号和英文逗号拆分。
+- `/ruleManage/getRuleManageList` 在 TokenFilter 排除路径中，应跳过 SSO / Token 校验。
+
+### 5.5 导入导出流程
+
+```mermaid
+flowchart TD
+    A[下载或准备 Excel 模板] --> B[填写 Prompt 或规则数据]
+    B --> C[上传 Excel]
+    C --> D[系统解析文件]
+    D --> E{业务校验}
+    E -- 通过 --> F[写入或更新数据库]
+    E -- 不通过 --> G[返回失败原因]
+    F --> H[可通过查询或导出验证结果]
+```
+
+测试关注点：
+
+- 空文件、字段缺失、字段类型异常的处理。
+- 规则导入时 Prompt 不存在的提示。
+- 导入后再导出，数据是否保持一致。
+- 导出文件名、sheet、字段顺序是否符合模板。
+
+---
+
+## 6. 接口分组说明
+
+接口完整字段和示例见 `design/api/规则管理-接口文档_整理版.md`。本节只说明接口分组和业务用途。
+
+### 6.1 登录与认证接口
+
+| 接口 | 用途 |
+|---|---|
+| `GET /` | 跳转到 SSO 登录地址 |
+| `GET /generateSSO` | 生成 SSO 扫码登录地址 |
+| `GET /auth/ssoCallBack` | SSO 回调、验签、生成登录态 |
+| `POST /login` | 查询当前登录状态 |
+| `GET /loginOut` | 登出并清理登录态 |
+| `GET /health` | 健康检查 |
+
+### 6.2 Prompt 管理接口
+
+| 接口 | 用途 |
+|---|---|
+| `POST /ruleManage/promptPageList` | Prompt 分页查询 |
+| `POST /ruleManage/promptBatchList` | Prompt 批量查询 |
+| `POST /ruleManage/getPromptList` | 对外查询 Prompt |
+| `POST /ruleManage/promptSave` | 新增 Prompt |
+| `POST /ruleManage/promptUpdate` | 修改 Prompt |
+| `POST /ruleManage/promptDelete` | 删除 Prompt |
+| `POST /ruleManage/exportPrompt` | 导出 Prompt Excel |
+| `POST /ruleManage/importPrompt` | 导入 Prompt Excel |
+| `POST /ruleManage/syncPromptDesc` | 从 PMP 同步 Prompt 描述 |
+| `POST /ruleManage/getPromptDescByIds` | 按 Prompt ID 查询 PMP 描述 |
+| `GET /ruleManage/getComboEntity` | 查询 Prompt 相关下拉选项 |
+
+### 6.3 规则管理接口
+
+| 接口 | 用途 |
+|---|---|
+| `POST /ruleManage/getRuleManagePageList` | 规则分页查询 |
+| `POST /ruleManage/getRuleManageList` | 对外查询规则 |
+| `POST /ruleManage/ruleManageSave` | 新增规则 |
+| `POST /ruleManage/ruleManageUpdate` | 修改规则 |
+| `POST /ruleManage/ruleManageDelete` | 删除规则 |
+| `POST /ruleManage/ruleManageUpdateStatus` | 规则上架或下架 |
+| `POST /ruleManage/exportRuleManage` | 导出规则 Excel |
+| `POST /ruleManage/importRuleManage` | 导入规则 Excel |
+| `POST /ruleManage/syncRuleManage` | 从映射规则表同步到正式规则表 |
+
+### 6.4 操作日志接口
+
+| 接口 | 用途 |
+|---|---|
+| `POST /log/pageList` | 操作日志分页查询 |
+| `GET /log/menus` | 查询操作菜单集合 |
+| `GET /log/operateAction` | 查询操作类型集合 |
+| `POST /log/exportLog` | 导出操作日志 |
+| `POST /log/delete` | 删除操作日志 |
+
+---
+
+## 7. 数据模型说明
+
+### 7.1 数据表总览
+
+| 数据表 | 业务含义 | 主要使用模块 |
+|---|---|---|
+| `tb_mapping_prompt` | Prompt 映射表，维护 Prompt 编号、名称、内容和业务维度 | Prompt 管理、规则校验、Prompt 同步 |
+| `tb_rule_manage` | 规则主表，维护业务编码、Prompt 编号、状态等规则主信息 | 规则管理、对外规则查询 |
+| `tb_rule_manage_sub` | 规则条件子表，维护一条规则下的多个条件 | 规则管理、条件过滤 |
+| `tb_mapping_rule_manage` | 原始规则映射表，用于从旧格式或 Excel 映射数据同步到正式规则表 | 规则同步、导入导出 |
+| `tb_operate_log` | 操作日志表，记录管理端关键操作 | 操作日志、审计 |
+
+### 7.2 Prompt 与规则的关系
+
+规则表中的 `prompt_id` 可以包含一个或多个 Prompt 编号，多个编号使用英文逗号分隔。系统新增或修改规则时，会逐个校验这些 Prompt 编号是否存在于 `tb_mapping_prompt`。
+
+```mermaid
+erDiagram
+    tb_mapping_prompt ||--o{ tb_rule_manage : "prompt_id referenced by"
+    tb_rule_manage ||--o{ tb_rule_manage_sub : "has conditions"
+```
+
+从业务角度看：
+
+- Prompt 表回答“执行智能阅读时使用什么提示语”。
+- 规则主表回答“哪个业务编码使用哪些 Prompt”。
+- 规则条件子表回答“在什么条件下命中这条规则”。
+
+### 7.3 正式规则表与映射规则表
+
+`tb_mapping_rule_manage` 是偏原始、扁平结构的映射表，一行中最多包含 `key1/key2/key3` 三组条件字段。同步或导入时，系统会将这些条件拆分成正式规则条件子表 `tb_rule_manage_sub`。
+
+正式结构的好处是：
+
+- 一条规则可以对应多条条件记录。
+- 对外查询时可以按条件列表进行过滤。
+- 主规则和条件明细职责更清晰。
+
+### 7.4 操作日志数据
+
+操作日志记录的是管理动作，不是业务结果数据。日志中会保存操作菜单、操作类型、请求参数、请求 IP、状态和时间。部分接口如果没有配置操作日志注解，则不会进入该日志记录链路。
+
+---
+
+## 8. 外部依赖与运行环境
+
+### 8.1 运行环境
+
+| 项目 | 当前配置或说明 |
+|---|---|
+| Java | 17 |
+| Spring Boot | 3.4.0 |
+| 服务端口 | `8090` |
+| 上下文路径 | `/readerRule` |
+| 构建工具 | Maven |
+| API 文档 | Knife4j / SpringDoc / Swagger |
+
+### 8.2 配置和中间件
+
+| 依赖 | 说明 |
+|---|---|
+| Apollo | 管理运行时配置，包括 SSO、PMP 同步地址、权限账号等 |
+| MySQL | 规则、Prompt、日志等业务数据存储 |
+| Druid | MySQL 连接池 |
+| Redis | 登录态和 token 缓存 |
+| SSO | 管理端登录认证 |
+| PMP 平台 | Prompt 描述同步来源 |
+| XXL Job / Spring Scheduling | 项目引入任务能力，当前操作日志清理使用 Spring 定时任务 |
+
+---
+
+## 9. 日志、权限与审计
+
+### 9.1 登录权限
+
+系统通过 SSO 登录和 token 缓存维护管理端访问权限。SSO 回调成功后，系统会校验账号是否在 Apollo 配置的允许列表中。
+
+Token 拦截器存在排除路径，部分接口不经过登录校验。业务和测试需要重点关注这些接口是否符合预期开放范围，尤其是对外查询、同步、导入导出和日志相关接口。
+
+### 9.2 操作审计
+
+带有 `@OperateLogAop` 注解的接口会记录操作日志。日志记录发生在接口执行前后，接口执行异常时会标记失败状态。
+
+日志保留策略由定时任务负责，当前任务每天 1 点清理 30 天前日志。
+
+---
+
+## 10. 测试关注点
+
+### 10.1 主流程测试
+
+- SSO 登录、登录状态查询、登出。
+- Prompt 新增、查询、修改、删除。
+- 规则新增、查询、修改、删除、上下架。
+- 外部系统查询 Prompt 和规则。
+- Prompt 和规则 Excel 导入导出。
+- Prompt 描述同步和规则同步。
+- 操作日志记录、查询、导出、删除。
+
+### 10.2 业务规则测试
+
+- 规则引用不存在的 Prompt 时应返回业务失败信息。
+- Prompt 被规则引用时应禁止删除。
+- 下架规则不应作为有效规则返回给外部查询。
+- 多个 `promptId` 用英文逗号分隔时应逐个校验。
+- 多个 `businessCode` 查询时应返回对应业务编码集合的规则。
+- 条件值中同时存在中文逗号和英文逗号时，过滤逻辑应符合预期。
+
+### 10.3 异常和边界测试
+
+- 请求体为空、必填字段为空、分页参数缺失。
+- Excel 文件为空、sheet 不匹配、列数不足、字段类型不合法。
+- PMP 同步接口不可用或返回异常。
+- MySQL、Redis、Apollo 配置异常。
+- 未登录访问受保护路径。
+- 非白名单账号登录。
+
+### 10.4 数据一致性测试
+
+- 规则主表和规则条件子表是否同时新增、更新和删除。
+- 导入规则后再导出，关键字段是否一致。
+- Prompt 同步后，Prompt 名称、描述、内容是否和 PMP 返回一致。
+- 操作日志是否记录关键管理操作，是否能按时间范围查询。
+
+---
+
+## 11. 与现有文档的关系
+
+| 文档 | 作用 |
+|---|---|
+| `design/architecture/业务架构说明.md` | 从业务、产品、测试视角说明系统架构和流程 |
+| `design/architecture/架构图-规则管理2.png` | 系统架构图，可作为本文档的视觉补充 |
+| `design/api/规则管理-接口文档_整理版.md` | 接口路径、请求参数、响应示例和调用说明 |
+| `design/storage/MySql 数据存储设计方案.md` | 数据库表结构、字段说明和数据关系 |
+| `README.md` | 项目整体简介、技术栈和基础结构说明 |
+
+后续维护建议：
+
+- 接口新增或字段变化时，先更新接口文档，再检查本文档的接口分组是否需要调整。
+- 数据表字段变化时，先更新存储文档，再检查本文档的数据模型说明是否需要调整。
+- 业务流程变化时，优先更新本文档中的流程和测试关注点。
