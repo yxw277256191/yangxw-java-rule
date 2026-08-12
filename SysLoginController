@@ -1,0 +1,241 @@
+package com.wind.stock.readerRule.rulemanage.controller;
+
+import cn.com.wind.ai.platform.framework.utils.*;
+import cn.com.wind.stock.base.common.bean.Response;
+import com.alibaba.fastjson.JSON;
+import com.alibaba.fastjson.JSONObject;
+import com.ctrip.framework.apollo.Config;
+import com.ctrip.framework.apollo.spring.annotation.ApolloConfig;
+import com.wind.stock.readerRule.common.auth.AjaxResult;
+import com.wind.stock.readerRule.common.auth.WindSSO;
+import com.wind.stock.readerRule.common.constants.Constants;
+import com.wind.stock.readerRule.common.utils.SpringProfileUtils;
+import com.wind.stock.readerRule.rulemanage.bean.entity.LoginUser;
+import com.wind.stock.readerRule.rulemanage.exception.ServiceException;
+import com.wind.stock.readerRule.rulemanage.service.SSOTokenService;
+import io.swagger.annotations.ApiOperation;
+import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.servlet.http.Cookie;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.StringUtils;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.web.bind.annotation.*;
+
+import java.io.IOException;
+import java.net.URLDecoder;
+import java.nio.charset.Charset;
+import java.util.*;
+
+/**
+ * 登录验证
+ * @author yangxw
+ */
+@Slf4j
+@Tag(name = "SSO扫码回调", description = "SSO扫码回调-提供sso登陆接口")
+@RestController
+public class SysLoginController {
+
+    @Autowired(required = false)
+    private WindSSO windSSO;
+    @ApolloConfig
+    private Config config;
+    @Autowired
+    private SSOTokenService tokenService;
+
+    @Value("${spring.profiles.active:}")
+    private String dev;
+    @Value("${sso.defaultAccount.username:}")
+    private String userName;
+    @Value("${sso.defaultAccount.password:}")
+    private String password;
+    @Value("${server.servlet.context-path:}")
+    private String contextPath;
+    @Value("${sso.token.expireTime}")
+    private int expireTime;
+
+    @GetMapping("/")
+    public void main(HttpServletRequest request, HttpServletResponse response) throws IOException {
+        String sso = windSSO.getSsoUrl();
+        response.sendRedirect(sso);
+    }
+
+    /**
+     * 生成SSO扫码链接
+     * @return sso地址
+     */
+    @GetMapping("/generateSSO")
+    public AjaxResult<?> generateSSO(){
+        if (windSSO == null) {
+            log.info("未配置sso登录");
+            throw new ServiceException("未配置sso登录");
+        }
+        String sso = windSSO.getSsoUrl();
+        return AjaxResult.success("SSO扫码登录", sso);
+    }
+
+    @ApiOperation(value = "SSO扫码回调", notes = "SSO扫码回调处理")
+    @GetMapping("/auth/ssoCallBack")
+    public void ssoCallBack(HttpServletRequest httpRequest, HttpServletResponse httpResponse) throws Exception {
+        try {
+            log.info("ssoCallBack 收到SSO回调请求");
+            if (windSSO == null) {
+                log.info("未配置sso登录");
+                this.sendError(httpResponse, 402, "未配置sso登录", windSSO.getSsoUrl());
+                return;
+            }
+            String userName = httpRequest.getParameter("account");
+            log.info("ssoCallBack userName:{}", userName);
+            if (StringUtils.isBlank(userName)) {
+                log.info("无效用户");
+                this.sendError(httpResponse, 403, "无效用户", windSSO.getSsoUrl());
+                return;
+            }
+
+            String queryString = httpRequest.getQueryString();
+            log.info("ssoCallBack 回调参数: {}", queryString);
+            if (StringUtils.isBlank(queryString) || !queryString.contains("sign=")) {
+                log.info("ssoCallBack SSO回调参数不完整");
+                this.sendError(httpResponse, 405, "SSO回调参数不完整", windSSO.getSsoUrl());
+                return;
+            }
+
+            // 解析回调参数
+            String t = httpRequest.getParameter("t"); // 时间戳
+            String sign = queryString.split("&sign=")[1];
+            String queryStringWithoutSign = queryString.split("&sign=")[0];
+            sign = URLDecoder.decode(sign, Charset.forName("utf-8"));
+            //String sign = httpRequest.getParameter("sign");
+            // 构建验证URL
+            String baseUrl = windSSO.authConfig.getBaseUrl() + "?" + queryStringWithoutSign;
+
+            String getSessionId = httpRequest.getSession().getId();
+            log.info("getSessionId:{}", getSessionId);
+
+            // 登录页访问时间限定在扫码后5分钟
+            long timeDiff = DateUtil.checkTime(t);
+            if (timeDiff > 32400) {
+                log.warn("时间验证失败: 时间差超过5分钟限制");
+                this.sendError(httpResponse, 406, "时间验证失败: 时间差超过5分钟限制", windSSO.getSsoUrl());
+                return;
+            }
+
+            // 验证SSO签名
+            boolean flag = windSSO.ssoVerify(baseUrl, sign, t);
+            if (!flag) {
+                log.error("SSO签名验证失败");
+                this.sendError(httpResponse, 406, "SSO签名验证失败", windSSO.getSsoUrl());
+                return;
+            }
+
+            // 获取用户信息
+            String account = httpRequest.getParameter("account");
+            String employeeCode = httpRequest.getParameter("employeecode");
+            String employeeid = httpRequest.getParameter("employeeid");
+            String time = httpRequest.getParameter("t");
+            String ipaddr = Md5SaltUtil.generateNormal(HttpRequestUtil.getIpAddr(httpRequest));
+
+            String userId = config.getProperty("data.framework.sso.userId", "wbyan,qqzhu.ricky,hjlong.longhaijin,xwyang.jason,zyzheng.celinezheng,kwang.kwang,zllu,fjsun.sunfujiang,wind1");
+            List<String> userIdList = Arrays.asList(userId.split(","));
+            // 验证userIdList是否包含原始userId（未分割的完整字符串）
+            boolean exists = userIdList.contains(account);
+            if (!exists) {
+                log.error("用户无权限：{}", account);
+                this.sendError(httpResponse, 407, "用户无权限: " + account, windSSO.getSsoUrl());
+                return;
+            }
+            LoginUser loginUser = new LoginUser();
+            loginUser.setUserName(account);
+            loginUser.setUserId(employeeCode);
+            loginUser.setIpaddr(ipaddr);
+            loginUser.setLoginTime(System.currentTimeMillis());
+            loginUser.setSessionId(getSessionId);
+            loginUser.setToken(sign);
+
+            //缓存用户信息，登陆信息
+            log.info("SSO签名验证通过，设置用户Session:{}", getSessionId);
+            LoginUser cacheUser = tokenService.cacheUser(loginUser);
+            log.info("cacheUser:{}", JSONObject.toJSON(cacheUser));
+            httpResponse.setHeader(Constants.TOKEN, sign);
+            httpResponse.setHeader(Constants.AUTH_HEADER_KEY, Constants.TOKEN_PREFIX + sign);
+            Cookie cookie = new Cookie(Constants.TOKEN, sign);
+            cookie.setPath(contextPath);
+            // expireTime 配置的分钟
+            cookie.setMaxAge(expireTime * 60000);
+            httpResponse.addCookie(cookie);
+
+            // 重定向到主页
+            String returnWebUrl = windSSO.authConfig.getReturnWebUrl();
+            log.info("SSO回调成功，重定向到前端web页面: {}", returnWebUrl);
+            httpResponse.sendRedirect(returnWebUrl);
+            return;
+        } catch (Exception e) {
+            log.error("处理SSO回调异常", e);
+            this.sendError(httpResponse, 408, "处理SSO回调异常", windSSO.getSsoUrl());
+            return;
+        }
+
+    }
+
+    private void sendError(HttpServletResponse response, int status, String message, String returnUrl) throws IOException {
+        response.setStatus(status);
+        response.setContentType("application/json;charset=UTF-8");
+
+        log.info("返回页面：{}", returnUrl);
+        Map<String, Object> errorResponse = new HashMap<>();
+        errorResponse.put("code", status);
+        errorResponse.put("message", message);
+        errorResponse.put("data", returnUrl);
+        response.getWriter().write(JSON.toJSONString(errorResponse));
+    }
+
+    @ApiOperation(value = "查询登陆状态", notes = "SSO登陆状态")
+    @PostMapping("/login")
+    public Response login(HttpServletRequest request) throws IOException {
+        String userName = request.getParameter("account");
+        log.info("login 查询登陆状态, userName：{}", userName);
+        Map<String, Object> resultMap = new HashMap<>();
+        // 获取用户认证信息
+        LoginUser loginUser = tokenService.getLoginUser(request);
+        log.info("login 查询登陆状态", "成功获取用户认证信息");
+        if (loginUser != null && StringUtils.isNotBlank(loginUser.getUserName())) {
+            resultMap.put("result", true);
+            resultMap.put("message", "当前登陆状态");
+            resultMap.put("item", loginUser);
+        } else {
+            resultMap.put("result", false);
+            resultMap.put("message", "当前登出状态");
+            resultMap.put("item", "");
+        }
+        return Response.ok(resultMap);
+    }
+
+    @ApiOperation(value = "登出", notes = "SSO登出")
+    @GetMapping("/loginOut")
+    public void loginOut(HttpServletRequest request, HttpServletResponse response) throws IOException {
+        if (SpringProfileUtils.testProfile()) {
+            response.setStatus(200);
+            response.setContentType("application/json;charset=UTF-8");
+
+            Map<String, Object> errorResponse = new HashMap<>();
+            errorResponse.put("code", 200);
+            errorResponse.put("message", "登出成功");
+            response.getWriter().write(JSON.toJSONString(errorResponse));
+            return;
+        }
+        log.info("开始SSO登出流程");
+        String sessionId = request.getSession().getId();
+        String userName = request.getParameter("account");
+        tokenService.delToken(sessionId);
+        log.info("loginOut userName:{}", userName);
+        String returnSsoUrl = windSSO.getSsoUrl();
+        log.info("SSO登出，重定向到扫码页面: {}", returnSsoUrl);
+        //response.sendRedirect(returnSsoUrl);
+        log.info("SSO登出，重定向到扫码页面,跳转URL:{}", returnSsoUrl);
+        sendError(response, 200, "SSO登出，重定向到扫码页面", returnSsoUrl);
+        return ;
+    }
+
+}
