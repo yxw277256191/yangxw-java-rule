@@ -1,0 +1,131 @@
+package com.wind.stock.readerRule.rulemanage.interceptor;
+
+import com.alibaba.fastjson.JSON;
+import com.wind.stock.readerRule.common.auth.WindSSO;
+import com.wind.stock.readerRule.common.utils.SpringProfileUtils;
+import com.wind.stock.readerRule.rulemanage.bean.entity.LoginUser;
+import com.wind.stock.readerRule.rulemanage.service.SSOTokenService;
+import jakarta.servlet.*;
+import jakarta.servlet.annotation.WebFilter;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.StringUtils;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Component;
+import org.springframework.util.AntPathMatcher;
+
+import java.io.IOException;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.Map;
+
+@Slf4j
+@WebFilter
+//@Component
+public class TokenFilter implements Filter {
+
+    @Autowired(required = false)
+    private WindSSO windSSO;
+    @Autowired
+    private SSOTokenService tokenService;
+
+    @Override
+    public void doFilter(ServletRequest request, ServletResponse response, FilterChain chain)
+            throws IOException, ServletException {
+
+        HttpServletRequest httpRequest = (HttpServletRequest) request;
+        HttpServletResponse httpResponse = (HttpServletResponse) response;
+        String requestURI = httpRequest.getRequestURI();
+
+        //开发者模式 如果是false 不需要扫码验证
+        if (!windSSO.authConfig.getEnable()) {
+            log.info("token.enable:{}", windSSO.authConfig.getEnable());
+            chain.doFilter(request, response);
+            return;
+        }
+
+        // 排除不需要验证的路径
+        if (isExcludedPath(requestURI)) {
+            chain.doFilter(request, response);
+            return;
+        }
+
+        // 检查是否是SSO回调请求
+        /*if (isSSOCallback(httpRequest)) {
+            chain.doFilter(request, response);
+            return;
+        }*/
+        LoginUser loginUser = tokenService.getLoginUser(httpRequest);
+        if (loginUser != null && StringUtils.isNotBlank(loginUser.getUserName())) {
+            tokenService.verifyToken(loginUser);
+            chain.doFilter(request, response);
+        } else {
+            log.info("sessionId无效或已过期,跳转URL:{}", windSSO.getSsoUrl());
+            sendErrorResponse(httpResponse, "sessionId无效或已过期", windSSO.getSsoUrl());
+            return ;
+        }
+
+    }
+
+    /**
+     * 检查是否是SSO回调请求
+     */
+    private boolean isSSOCallback(HttpServletRequest request) {
+        String account = request.getParameter("account");
+        String employeeCode = request.getParameter("employeecode");
+        String sign = request.getParameter("sign");
+        String t = request.getParameter("t");
+
+        return StringUtils.isNotBlank(account) && StringUtils.isNotBlank(employeeCode) && StringUtils.isNotBlank(sign) && StringUtils.isNotBlank(t);
+    }
+
+
+    private boolean isExcludedPath(String path) {
+        String[] patterns = {
+                "/readerRule/login",
+                "/readerRule/loginOut",
+                "/readerRule/generateSSO",
+                "/readerRule/auth/ssoCallBack",
+                "/readerRule/health",
+                "/readerRule/index.html",
+                "/readerRule/js/**",
+                "/readerRule/css/**",
+                "/readerRule/ruleManage/promptUpdate",
+                //"/readerRule/ruleManage/promptBatchList",
+                //"/readerRule/ruleManage/getRuleManagePageList",
+                "/readerRule/ruleManage/getPromptList",
+                "/readerRule/ruleManage/getRuleManageList",
+                "/readerRule/ruleManage/syncRuleManage",
+                "/readerRule/ruleManage/syncPromptDesc",
+                "/readerRule/ruleManage/exportPrompt",
+                "/readerRule/ruleManage/importPrompt",
+                "/readerRule/ruleManage/exportRuleManage",
+                "/readerRule/ruleManage/importRuleManage",
+                "/readerRule/doc.html",
+                "/readerRule/v3/api-docs/swagger-config",
+                "/readerRule/swagger-resources/**",
+                "/readerRule/swagger-ui/index.html",
+                "/readerRule/swagger-ui.html/**",
+                "/readerRule/log/**",
+                "/readerRule/file/*.{jpg,png,gif}"
+        };
+
+        AntPathMatcher matcher = new AntPathMatcher();
+        return Arrays.stream(patterns).anyMatch(pattern -> matcher.match(pattern, path));
+    }
+
+
+    private void sendErrorResponse(HttpServletResponse response, String message, String returnUrl) throws IOException {
+        response.setStatus(401);
+        response.setContentType("application/json;charset=UTF-8");
+
+        Map<String, Object> errorResponse = new HashMap<>();
+        errorResponse.put("code", 401);
+        errorResponse.put("message", message);
+        errorResponse.put("data", returnUrl);
+
+        response.getWriter().write(JSON.toJSONString(errorResponse));
+    }
+
+}
