@@ -1,0 +1,81 @@
+package com.wind.stock.readerRule;
+
+import com.ctrip.framework.apollo.spring.annotation.EnableApolloConfig;
+import com.wind.stock.readerRule.common.utils.SpringProfileUtils;
+import lombok.extern.slf4j.Slf4j;
+import org.mybatis.spring.annotation.MapperScan;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.CommandLineRunner;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.core.env.Environment;
+import org.springframework.retry.annotation.EnableRetry;
+import org.springframework.scheduling.annotation.EnableAsync;
+import org.springframework.scheduling.annotation.EnableScheduling;
+
+/**
+ * 投研框架
+ *
+ * @author yangxw
+ * @version 1.0
+ * @date 2025-01-21
+ */
+@Slf4j
+@EnableStockComponents
+@EnableAsync
+@EnableRetry
+@SpringBootApplication
+@MapperScan(basePackages = {"com.wind.stock.readerRule.*.mapper.mysql"})
+@EnableApolloConfig({"application.yml", "application.properties"})
+@EnableScheduling
+public class ReaderRuleApplication implements CommandLineRunner {
+
+    @Autowired
+    private Environment environment;
+
+    static {
+        String osName = System.getProperty("os.name").toLowerCase();
+        System.out.println(osName);
+        if (!osName.contains("linux") && osName.contains("windows")) {
+            System.setProperty("java.library.path", "D:\\dll");
+            System.load("D:\\dll\\Wind.Expo4.dll");
+            System.load("D:\\dll\\Wind.GFS.Client.dll");
+            System.load("D:\\dll\\libmupdf.dll");
+            System.load("D:\\dll\\WindPDFLib.dll");
+            System.load("D:\\dll\\CryptoCPP.dll");
+        }
+    }
+
+    public static void main(String[] args) {
+        try {
+            SpringApplication.run(ReaderRuleApplication.class, args);
+            log.info("ReaderRuleApplication start success");
+        } catch (Exception ex) {
+            log.error("ReaderRuleApplication error:", ex);
+        }
+    }
+
+    @Override
+    public void run(String... args) {
+        log.info("ReaderRuleApplication Application Running....................");
+
+        // 使用 Environment 获取配置
+        String testKey = environment.getProperty("apollo.test-key");
+        String testKey2 = environment.getProperty("apollo.test-key2");
+        if (testKey != null && testKey2 != null) {
+            log.info("Apollo连接正常，apollo.test-key: {}", testKey);
+            log.info("Apollo连接正常，apollo.test-key2: {}", testKey2);
+        } else {
+            log.warn("无法从Apollo获取配置项 'apollo.test-key'，请检查Apollo连接是否正常。");
+        }
+
+        // 测试SpringProfileUtils
+        log.info("getProfile: {}", SpringProfileUtils.getProfile());
+        log.info("devProfile: {}", SpringProfileUtils.devProfile());
+        log.info("testProfile: {}", SpringProfileUtils.testProfile());
+        log.info("trialProfile: {}", SpringProfileUtils.trialProfile());
+        log.info("njProdProfile: {}", SpringProfileUtils.njProdProfile());
+        log.info("shProdProfile: {}", SpringProfileUtils.shProdProfile());
+        log.info("productionProfile: {}", SpringProfileUtils.prodProfile());
+    }
+}
