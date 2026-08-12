@@ -1,0 +1,115 @@
+package com.wind.stock.readerRule.rulemanage.enums;
+
+import java.io.Serializable;
+
+/**
+ * @Author damon.shen
+ * @Description
+ * @DATE 2022-10-13
+ * @VERSION 1.0
+ */
+public enum OperateMenuEnums implements Serializable {
+
+    /** 提示语 */
+    Prompt_PAGE_LIST("提示语-分页查询","Prompt PageList", "prompt:promptPageList"),
+    Prompt_LIST("提示语-查询","Prompt List", "prompt:promptList"),
+    Prompt_BATCH_LIST("提示语-批量查询","Prompt BatchList", "prompt:promptBatchList"),
+    Prompt_SAVE("提示语-新增","Prompt save", "prompt:save"),
+    Prompt_UPDATE("提示语-修改","Prompt update", "prompt:update"),
+    Prompt_DELETE("提示语-删除","Prompt delete", "prompt:delete"),
+    Prompt_SYNC_DATA("提示语-数据同步描述","Prompt syncPromptDesc", "prompt:syncPromptDesc"),
+    Prompt_EXPORT("提示语-导出","Prompt export", "prompt:export"),
+    Prompt_IMPORT("提示语-导入","Prompt import", "prompt:import"),
+
+    /** 规则管理 */
+    RuleManage_PAGE_LIST("规则管理-分页查询","RuleManage prompt-PageList", "ruleManage:promptPageList"),
+    RuleManage_LIST("规则管理-查询","RuleManage prompt-List", "ruleManage:promptList"),
+    RuleManage_BATCH_LIST("规则管理-批量查询","RuleManage prompt-BatchList", "ruleManage:promptBatchList"),
+    RuleManage_SYNC_DATA("规则管理-数据同步","RuleManage RuleManage-syncRuleManage", "ruleManage:syncRuleManage"),
+    RuleManage_SAVE("规则管理-新增","RuleManage Manage-save", "ruleManage:save"),
+    RuleManage_UPDATE("规则管理-修改","RuleManage Manage-update", "ruleManage:update"),
+    RuleManage_UPDATE_STATUS("规则管理-上架/下架","RuleManage Manage-updateStatus", "ruleManage:updateStatus"),
+    RuleManage_DELETE("规则管理-删除","RuleManage Manage-delete", "ruleManage:delete"),
+    RuleManage_EXPORT("规则管理-导出","RuleManage Manage-export", "ruleManage:export"),
+    RuleManage_IMPORT("规则管理-导入","RuleManage Manage-import", "ruleManage:import"),
+
+    /** 日志管理 */
+    OPERATE_LOG_LIST("日志管理-分页查询日志","Log Manage-pageList", "log:pageList"),
+    OPERATE_LOG_EXPORT("日志管理-分页查询日志","Log Manage-exportLog", "log:exportLog"),
+
+    /** 菜单管理 */
+    MENU_PAGE_LIST("菜单管理-分页查询菜单","Menu Manage-pageList", "menu:pageList"),
+    MENU_SAVE("菜单管理-新增","Menu Manage-save", "menu:save"),
+    MENU_UPDATE("菜单管理-修改","Menu Manage-update", "menu:update"),
+    MENU_DELETE("菜单管理-删除","Menu Manage-delete", "menu:delete"),
+
+    MENU_APPLY_LIST("应用管理-查询本菜单列表","App Manage-listAppById", "menu:apply:list"),
+    MENU_APPLY_SYNC("应用管理-应用同步","App Manage-syncApply", "menu:apply:syncApply"),
+    MENU_APPLY_SYNC_MENU("应用管理-应用同步菜单","App Manage-syncMenu", "menu:apply:syncMenu"),
+
+
+    /** 用户管理 */
+    USER_PAGE_LIST("用户管理-分页查询用户","User Manage-pageList", "user:pageList"),
+    USER_SAVE("用户管理-新增","User Manage-save", "user:save"),
+    USER_UPDATE("用户管理-修改","User Manage-update", "user:update"),
+    USER_DELETE("用户管理-删除","User Manage-delete", "user:delete"),
+    USER_BATCH_DELETE("用户管理-批量删除","User Manage-deleteBatch", "user:deleteBatch"),
+    USER_DETAIL("用户管理-详情","User Manage-detail", "user:detail"),
+    USER_UPDATE_PASSWORD("用户管理-修改密码","User Manage-updatePaw", "user:updatePaw"),
+    USER_ON_OFF("用户管理-启用/禁用","User Manage-updateOnOff", "user:updateOnOff"),
+    USER_UPDATE_CONTACT("用户管理-(绑定/修改)联系方式","User Manage-updateContact", "user:updateContact"),
+    USER_SAVE_ROLE("用户管理-给用户添加角色","User Manage-userSaveRole", "user:userSaveRole"),
+    USER_LIST("用户管理-查询用户","User Manage-account", "user:account"),
+
+    /** 角色管理 */
+    ROLE_PAGE_LIST("角色管理-分页查询角色","Role Manage-pageList", "role:pageList"),
+    ROLE_SAVE("角色管理-新增","Role Manage-save", "role:save"),
+    ROLE_UPDATE("角色管理-修改","Role Manage-update", "role:update"),
+    ROLE_DELETE("角色管理-删除","Role Manage-delete", "role:delete"),
+    ROLE_SELECT_MENU("角色管理-角色查询菜单（选中）","Role Manage-roleSelectMenu", "role:roleSelectMenu"),
+    ROLE_SAVE_MENU("角色管理-给角色添加菜单","Role Manage-roleSaveMenu", "role:roleSaveMenu"),
+    ROLE_DELETE_USER("角色管理-角色删除用户","Role Manage-roleDeleteUser", "role:roleDeleteUser"),
+    ROLE_DELETE_MENU("角色管理-角色删除菜单","Role Manage-roleDeleteMenu", "role:roleDeleteMenu"),
+    ROLE_USER_PAGE_LIST("角色管理-分页查询角色用户列表","Role Manage-pageListRoleUser", "role:pageListRoleUser"),
+
+    /** 验证码管理 */
+    VALID_CODE_PAGE_LIST("验证码管理-分页查询验证码","ValidCode Manage-pageList", "validCode:pageList"),
+    VALID_CODE_SAVE("验证码管理-新增","ValidCode Manage-save", "validCode:save"),
+    VALID_CODE_LIST("验证码管理-修改","ValidCode Manage-validCodeByCode", "validCode:validCodeByCode"),
+
+    ;
+
+
+    private String menuDesc;
+
+    private String menuDescEn;
+
+    private String menuCode;
+
+    OperateMenuEnums(String menuDesc, String menuDescEn, String menuCode) {
+        this.menuDesc = menuDesc;
+        this.menuDescEn = menuDescEn;
+        this.menuCode = menuCode;
+    }
+
+    public String getMenuDesc() {
+        return menuDesc;
+    }
+
+    public String getMenuDescEn() {
+        return menuDescEn;
+    }
+
+    public String getMenuCode() {
+        return menuCode;
+    }
+
+    public static String getDesc(String code){
+        for (OperateMenuEnums value : OperateMenuEnums.values()) {
+            if(value.getMenuCode().equals(code)){
+                return value.getMenuDesc();
+            }
+        }
+        return "unknown";
+    }
+}
