@@ -1,0 +1,21 @@
+package com.wind.stock.airesearch.common.constants;
+
+import io.swagger.annotations.ApiModelProperty;
+import lombok.Data;
+
+import java.io.Serializable;
+
+@Data
+public class ComboEntity implements Serializable {
+
+    private static final long serialVersionUID = -958179267941650521L;
+    @ApiModelProperty(value = "枚举值")
+    private String itemValue;
+    @ApiModelProperty(value = "枚举名称")
+    private String itemName;
+
+    public ComboEntity(String itemValue, String itemName) {
+        this.itemValue = itemValue;
+        this.itemName = itemName;
+    }
+}
