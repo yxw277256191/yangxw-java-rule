@@ -1,0 +1,312 @@
+package com.wind.stock.airesearch.common.constants;
+
+import com.google.common.collect.ImmutableMap;
+import java.util.Map;
+
+/**
+ * @author yangxw
+ * @date 2023/12/20
+ */
+public class Constants {
+
+    public interface Number {
+        int MINUS_ONE = -1;
+        int ZERO_INT = 0;
+        int ONE_INT = 1;
+        int TWO_INT = 2;
+        int THREE_INT = 3;
+        int FOUR_INT = 4;
+        int FIVE_INT = 5;
+        int SIX_INT = 6;
+        int SEVEN_INT = 7;
+        int EIGHT_INT = 8;
+        int NINE_INT = 9;
+        int TEN_INT = 10;
+        int TWENTY_INT = 20;
+        int TWENTY_ONE_INT = 21;
+        int FIFTY_INT = 50;
+    }
+
+    //AIGC-业务模型 (1:生成框架, 2:拆解, 4:聚合, 3:挂树)
+    public interface PromptId {
+        //框架 -文件AIGC模型-自有文档
+        String PromptId_1_P045503 = "P045503";
+        //框架 -文件AIGC模型-单个
+        String PromptId_1_P042185 = "P042185";
+        //框架 -文件AIGC模型-年报  P050156
+        String PromptId_1_P050156 = "P050156";
+        //框架 -文件AIGC模型-汇总
+        String PromptId_1_P042256 = "P042256";
+
+        //拆解 -文件AIGC模型-单个
+        String PromptId_2_P042253 = "P042253";
+        //拆解 -文件AIGC模型-单个汇总
+        String PromptId_2_P042848 = "P042848";
+        //拆解 -文件AIGC模型-汇总
+        String PromptId_2_P042254 = "P042254";
+
+        //指标 -查询指标结果-汇总
+        String PromptId_4_P050620 = "P050620";
+
+        //聚合 -汇总
+        String PromptId_3_P042255 = "P042255";
+
+        //框架 -文件AIGC模型-质检结果
+        String PromptId_1_P048724 = "P048724";
+
+        //5:框架A+实体事件=聚合中间结果1
+        String PromptId_5_P051132 = "P051132";
+
+        //6:框架A+指标=聚合中间结果2
+        String PromptId_6_P051133 = "P051133";
+
+    }
+
+    //AIGC-业务类型 (1:生成框架, 2:拆解, 4:指标, 3:聚合,  5:框架A+实体事件=聚合中间结果1, 6:框架A+指标=聚合中间结果2)
+    public interface NodeType {
+        String ONE = "1";
+        String TWO = "2";
+        String THREE = "3";
+        String FOUR = "4";
+        String FIVE = "5";
+        String SIX = "6";
+    }
+
+    //任务状态(0:未开始，1:进行中, 2:完成， 3:异常)
+    public interface TaskStatus {
+        int ZERO = 0;
+        int ONE = 1;
+        int TWO = 2;
+        int THREE = 3;
+    }
+
+    //AIGC状态(0:未开始，1:进行中, 2:完成， 3:异常)
+    public interface OverviewStatus {
+        int ZERO = 0;
+        int ONE = 1;
+        int TWO = 2;
+        int THREE = 3;
+    }
+
+    //增量数据（0：未执行，1：执行中，2：完成，3：默认状态）
+    public interface NewDataStatus {
+        int ZERO = 0;
+        int ONE = 1;
+        int TWO = 2;
+        int THREE = 3;
+    }
+
+    //方案查询 -类型（1：国内机构调研数据&分析师研报，2：高盛指定外资机构，3：不验证金牌分析师, 4：年报）
+    public interface PlanType {
+        String ONE = "1";
+        String TWO = "2";
+        String THREE = "3";
+        String FOUR = "4";
+    }
+
+    public final static Map<Integer, String> EXPORT_STATUS_KEY = new ImmutableMap.Builder<Integer, String>()
+            .put(0, "等待导出")
+            .put(1, "正在导出")
+            .put(2, "导出完成")
+            .put(3, "无数据")
+            .put(4, "导出异常")
+            .build();
+
+    public interface DocSource {
+        String ONE = "1";
+        String TWO = "2";
+        String THREE = "3";
+        String FOUR = "4";
+    }
+
+    /**
+     * 0.用户上传，1.新闻，2.公告，3.研报
+     */
+    public interface DocType {
+        String ONE = "1";
+        String TWO = "2";
+        String THREE = "3";
+        String FOUR = "4";
+    }
+
+    public interface MediaType {
+        String THREE = "3";
+        String SIX_TEEN = "16";
+    }
+
+    //密码类型: 1-修改密码,2-忘记密码,3-重置密码
+    public interface PassType {
+        int ONE_INT = 1;
+        int TWO_INT = 2;
+        int THREE_INT = 3;
+    }
+
+    //状态（0-已启用,1-已过期,2-已禁用）
+    public interface UserStatus {
+        int ON = 0;
+        int EXPIRE = 1;
+        int OFF = 2;
+    }
+
+    public interface CommandFormat {
+        String DECODE_COMMAND = "name=decr&objectid={0}&refertype={1}";
+        String ENCODE_COMMAND = "name=encr&objectid={0}&refertype={1}";
+    }
+
+    /**
+     * 时间格式
+     */
+    public static class DateFormat {
+
+        public static final String StandardDateTimeFormat = "yyyy-MM-dd HH:mm:ss";
+
+        public static final String StandardDateFormat = "yyyy-MM-dd";
+
+    }
+
+
+    public static final String TRACE_ID = "TRACE_ID";
+
+    public static final String TRACE_QUESTION = "TRACE_QUESTION";
+
+    /**
+     * 开发环境
+     */
+    public static final String DEV_ENV = "dev";
+
+    /**
+     * SSO扫码登录不需要密码，直接设置统一密码校验
+     */
+    public static final String PASSWORD = "admin123";
+    /**
+     * UTF-8 字符集
+     */
+    public static final String UTF8 = "UTF-8";
+
+    /**
+     * GBK 字符集
+     */
+    public static final String GBK = "GBK";
+
+    /**
+     * www主域
+     */
+    public static final String WWW = "www.";
+
+    /**
+     * http请求
+     */
+    public static final String HTTP = "http://";
+
+    /**
+     * https请求
+     */
+    public static final String HTTPS = "https://";
+
+    /**
+     * 通用成功标识
+     */
+    public static final String SUCCESS = "0";
+
+    /**
+     * 通用失败标识
+     */
+    public static final String FAIL = "1";
+
+    /**
+     * 登录成功
+     */
+    public static final String LOGIN_SUCCESS = "Success";
+
+    /**
+     * 注销
+     */
+    public static final String LOGOUT = "Logout";
+
+    /**
+     * 注册
+     */
+    public static final String REGISTER = "Register";
+
+    /**
+     * 登录失败
+     */
+    public static final String LOGIN_FAIL = "Error";
+
+    /**
+     * 验证码有效期（分钟）
+     */
+    public static final Integer CAPTCHA_EXPIRATION = 2;
+
+    /**
+     * 令牌
+     */
+    public static final String TOKEN = "token";
+
+    /**
+     * 鉴权头关键字
+     */
+    public static final String AUTH_HEADER_KEY = "Authorization";
+    /**
+     * 令牌前缀
+     */
+    public static final String TOKEN_PREFIX = "Bearer ";
+
+    /**
+     * 令牌前缀
+     */
+    public static final String LOGIN_USER_KEY = "airesearch.login_user_key";
+
+    /**
+     * 用户ID
+     */
+    public static final String JWT_USERID = "userid";
+
+    /**
+     * 用户名称
+     */
+    public static final String JWT_USERNAME = "sub";
+
+    /**
+     * 用户头像
+     */
+    public static final String JWT_AVATAR = "avatar";
+
+    /**
+     * 管理员
+     */
+    public static final String ADMIN = "admin";
+
+    /**
+     * 创建时间
+     */
+    public static final String JWT_CREATED = "created";
+
+    /**
+     * 用户权限
+     */
+    public static final String JWT_AUTHORITIES = "authorities";
+
+    /**
+     * 资源映射路径 前缀
+     */
+    public static final String RESOURCE_PREFIX = "/profile";
+
+
+
+    /**
+     * 开启（0表示用户，角色，用户组状态的开启）
+     */
+    public static final String OPEN_STATUS = "0";
+    /**
+     * 关闭（1表示用户，角色，用户组状态的关闭）
+     */
+    public static final String CLOSE_STATUS = "1";
+
+    /**
+     * 默认用户角色key
+     */
+    public static final String DEFAULT_ROLE = "airesearch.roleKey";
+
+
+}
