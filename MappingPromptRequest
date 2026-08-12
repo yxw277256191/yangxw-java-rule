@@ -1,0 +1,91 @@
+package com.wind.stock.readerRule.rulemanage.bean.request;
+
+import com.fasterxml.jackson.annotation.JsonFormat;
+import com.wind.stock.readerRule.common.constants.Constants;
+import io.swagger.v3.oas.annotations.media.Schema;
+import lombok.Data;
+import org.springframework.data.annotation.CreatedDate;
+
+import java.io.Serializable;
+import java.util.Date;
+import java.util.List;
+
+/**
+ * 映射表-提示语
+ */
+@Schema(description = "提示语-请求参数")
+@Data
+public class MappingPromptRequest extends PageVO implements Serializable {
+
+    @Schema(description = "主键ID")
+    private Long id;
+
+    @Schema(description = "提示语-旧编号")
+    private String promptIdOld;
+
+    @Schema(description = "提示语-编号")
+    private String promptId;
+
+    @Schema(description = "提示语-编号名称")
+    private String promptName;
+
+    @Schema(description = "提示语")
+    private String prompt;
+
+    @Schema(description = "提示语-内容")
+    private String promptContent;
+
+    @Schema(description = "排序")
+    private Integer ordering;
+
+    @Schema(description = "提示语-备注")
+    private String remark;
+
+    @Schema(description = "创建时间")
+    @CreatedDate
+    @JsonFormat(pattern = Constants.DateFormat.StandardDateTimeFormat)
+    private Date createTime;
+
+    //@LastModifiedDate
+    //@JsonFormat(pattern = Constants.DateFormat.StandardDateTimeFormat)
+    //private Date updateTime;
+
+    @Schema(description = "发布人，操作者")
+    private String createBy;
+
+    @Schema(description = "提示语-编号-批量查询")
+    private List<String> promptIdList;
+
+
+    @Schema(description = "原文类型(公告)")
+    private String sourceType;
+
+    @Schema(description = "产品类型(股票)")
+    private String productType;
+
+    @Schema(description = "股票市场(A,A/H)")
+    private String stockMarket;
+
+    @Schema(description = "公告大类(半年/年度报告, 年报)")
+    private String annCategories;
+
+    @Schema(description = "公告类型")
+    private String annType;
+
+
+    @Schema(description = "原文类型(公告)List")
+    private List<String> sourceTypeList;
+
+    @Schema(description = "产品类型(股票)List")
+    private List<String> productTypeList;
+
+    @Schema(description = "股票市场(A,A/H)List")
+    private List<String> stockMarketList;
+
+    @Schema(description = "公告大类(半年/年度报告, 年报)List")
+    private List<String> annCategoriesList;
+
+    @Schema(description = "公告类型List")
+    private List<String> annTypeList;
+
+}
