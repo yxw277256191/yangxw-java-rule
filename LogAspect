@@ -1,0 +1,153 @@
+package com.wind.stock.readerRule.rulemanage.aop;
+
+import cn.com.wind.stock.base.utils.UserSessionUtils;
+import com.alibaba.fastjson.JSON;
+import com.wind.stock.readerRule.common.constants.Constants;
+import com.wind.stock.readerRule.rulemanage.annotation.OperateLogAop;
+import com.wind.stock.readerRule.rulemanage.mapper.entity.OperateLog;
+import com.wind.stock.readerRule.rulemanage.service.OperateLogService;
+import jakarta.servlet.http.HttpServletRequest;
+import lombok.extern.slf4j.Slf4j;
+import org.aspectj.lang.ProceedingJoinPoint;
+import org.aspectj.lang.annotation.Around;
+import org.aspectj.lang.annotation.Aspect;
+import org.aspectj.lang.annotation.Pointcut;
+import org.aspectj.lang.reflect.MethodSignature;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.core.annotation.Order;
+import org.springframework.stereotype.Component;
+import org.springframework.web.context.request.RequestContextHolder;
+import org.springframework.web.context.request.ServletRequestAttributes;
+
+import java.lang.reflect.Method;
+import java.util.Date;
+import java.util.Map;
+import java.util.StringJoiner;
+
+/**
+ * @Description 操作日志拦截
+ * @DATE 2025-08-20
+ * @VERSION 1.0
+ */
+@Component
+@Aspect
+@Order(1)
+@Slf4j
+public class LogAspect {
+
+    @Autowired
+    private OperateLogService operateLogService;
+
+    @Pointcut("@annotation(com.wind.stock.readerRule.rulemanage.annotation.OperateLogAop)")
+    public void saveOperateLog() {
+    }
+
+    @Around("saveOperateLog()")
+    public Object saveOperateLog(ProceedingJoinPoint point) throws Throwable {
+        ServletRequestAttributes servletRequestAttributes = (ServletRequestAttributes) RequestContextHolder.getRequestAttributes();
+
+        String ip = null;
+        String param = "";
+        String operateMenu = null;
+        String operateMenuEn = null;
+        String operateMenuCode = null;
+        String operateAction = null;
+        String createBy = "";
+        String updateBy = "";
+
+        if (servletRequestAttributes != null) {
+
+            HttpServletRequest request = servletRequestAttributes.getRequest();
+            // ip
+            ip = getRemoteHost(request);
+            // 请求方式
+            String httpMethod = request.getMethod();
+            MethodSignature signature = (MethodSignature) point.getSignature();
+            Method method = signature.getMethod();
+
+            OperateLogAop annotation = method.getAnnotation(OperateLogAop.class);
+            // 参数
+            param = "";
+            if ("POST".equals(httpMethod) || "PUT".equals(httpMethod)) {
+                if (annotation.recordParam()) {
+                    try {
+                        param = JSON.toJSONString(point.getArgs());
+                    } catch (Exception e) {
+                        log.error("记录操作日志，序列号异常：{}", e);
+                    }
+                }
+            } else {
+                param = getUrlParam(request);
+            }
+            //RespUserVO userInfo = UserThreadLocalUtils.get();
+            operateAction = annotation.operateAction().name();
+            operateMenu = annotation.operateMenu().getMenuDesc();
+            operateMenuEn = annotation.operateMenu().getMenuDescEn();
+            operateMenuCode = annotation.operateMenu().getMenuCode();
+            //createBy = Objects.isNull(userInfo) ? "unknown" : userInfo.getUserAccount();
+            //updateBy = Objects.isNull(userInfo) ? "unknown" : userInfo.getUserName();
+            //createBy = UserSessionUtils.getUserId() + "";
+
+        }
+        Object proceed;
+        Date currentTime = new Date();
+        OperateLog operateLogDto = new OperateLog();
+        operateLogDto.setOperateMenuCode(operateMenuCode);
+        operateLogDto.setOperateMenuDesc(operateMenu);
+        operateLogDto.setOperateAction(operateAction);
+        if (param.length() > 3000) {
+            operateLogDto.setOperateData(param.substring(0, 2999));
+        } else {
+            operateLogDto.setOperateData(param);
+        }
+        operateLogDto.setIp(ip);
+        operateLogDto.setRequestStatus(Constants.Number.ONE_INT);
+        operateLogDto.setCreateBy(createBy);
+        operateLogDto.setCreateTime(currentTime);
+
+        try {
+            proceed = point.proceed(point.getArgs());
+        } catch (Exception e) {
+            operateLogDto.setRequestStatus(Constants.Number.ZERO_INT);
+            log.error("操作日志插入异常:{}", e.getMessage());
+            throw e;
+        } finally {
+            operateLogService.insertOperateLog(operateLogDto);
+        }
+        return proceed;
+    }
+
+    private String getUrlParam(HttpServletRequest request) {
+        Map<String, String[]> parameterMap = request.getParameterMap();
+        StringBuilder paramKv = new StringBuilder();
+        StringJoiner urlParam = new StringJoiner(", ");
+        for (Map.Entry<String, String[]> entry : parameterMap.entrySet()) {
+            for (String s : entry.getValue()) {
+                paramKv.append(entry.getKey()).append("=").append(s);
+            }
+            urlParam.add(paramKv.toString());
+            paramKv = new StringBuilder();
+        }
+        return urlParam.toString();
+    }
+
+    /**
+     * 获取目标主机的ip
+     *
+     * @param request
+     * @return
+     */
+    private String getRemoteHost(HttpServletRequest request) {
+        String ip = request.getRemoteAddr();
+        if (ip == null || ip.length() == 0 || "unknown".equalsIgnoreCase(ip)) {
+            ip = request.getHeader("x-forwarded-for");
+        }
+        if (ip == null || ip.length() == 0 || "unknown".equalsIgnoreCase(ip)) {
+            ip = request.getHeader("Proxy-Client-IP");
+        }
+        if (ip == null || ip.length() == 0 || "unknown".equalsIgnoreCase(ip)) {
+            ip = request.getHeader("WL-Proxy-Client-IP");
+        }
+        return "0:0:0:0:0:0:0:1".equals(ip) ? "127.0.0.1" : ip;
+    }
+}
