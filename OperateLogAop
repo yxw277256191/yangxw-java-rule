@@ -1,0 +1,33 @@
+package com.wind.stock.readerRule.rulemanage.annotation;
+
+import com.wind.stock.readerRule.rulemanage.enums.OperateLogTypeEnums;
+import com.wind.stock.readerRule.rulemanage.enums.OperateMenuEnums;
+
+import java.lang.annotation.*;
+
+/**
+ * @Author
+ * @Description 操作日志
+ * @DATE 2022-10-13
+ * @VERSION 1.0
+ */
+@Documented
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.METHOD)
+public @interface OperateLogAop {
+
+    /**
+     * 操作菜单
+     */
+    OperateMenuEnums operateMenu();
+
+    /**
+     * 操作类型
+     */
+    OperateLogTypeEnums operateAction();
+
+    /**
+     * true-文本参数 false-文件参数
+     */
+    boolean recordParam() default true;
+}
