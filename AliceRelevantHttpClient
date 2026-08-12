@@ -1,0 +1,94 @@
+package com.wind.stock.airesearch.common.client;
+
+import com.alibaba.fastjson.JSONObject;
+import com.ctrip.framework.apollo.Config;
+import com.ctrip.framework.apollo.spring.annotation.ApolloConfig;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.wind.stock.airesearch.common.config.RetrievalConfig;
+import com.wind.stock.airesearch.framework.service.OceanDecryptExpoClient;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang.StringUtils;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Component;
+
+import java.util.*;
+
+/**
+ * 根据问题对PDF进行摘要
+ * @date 2023/7/21
+ */
+@Slf4j
+@Component("AliceRelevantHttpClient")
+public class AliceRelevantHttpClient {
+
+    @Autowired
+    private HttpProxyDecorator httpProxyDecorator;
+    @ApolloConfig
+    private Config config;
+    @Autowired
+    private RetrievalConfig retrievalConfig;
+    @Autowired
+    private OceanDecryptExpoClient oceanDecryptExpoClient;
+
+    /**
+     * 向量召回接口
+     *
+     * @param docId
+     * @param question
+     * @return Wind.Stock.DocRecall.Service
+     */
+    public String retrieveV4(String docId, String question) {
+        String retrieveUrl = config.getProperty("docRecall.content.retrieveUrl", "http://10.25.3.215:8000/docVector/v1/retrieve-fulltext");
+        //String retrieveUrl = config.getProperty("docRecall.content.retrieveUrl", "https://test.wind.com.cn/docVector/v1/retrieve");
+        int topk = config.getIntProperty("docRecall.content.topk", 128);
+        Map<String, Object> paraMap = new HashMap<>();
+        paraMap.put("doc_id", docId);
+        paraMap.put("query", question);
+        paraMap.put("topK", topk);
+        String retrieveResult = httpProxyDecorator.postV2(retrieveUrl, JSONObject.toJSONString(paraMap));
+        if (StringUtils.isNotEmpty(retrieveResult)) {
+            JSONObject retrieveResultJson = JSONObject.parseObject(retrieveResult);
+            int code = retrieveResultJson.getIntValue("code");
+            if (code == 0) {
+                return this.parseNewDoRecallResult(retrieveResult);
+            }
+        }
+        return "";
+    }
+
+    public static String parseNewDoRecallResult(String jsonString) {
+        String finalResult = null;
+        try {
+            ObjectMapper mapper = new ObjectMapper();
+            // 1. 将字符串解析为 JsonNode 树状结构
+            JsonNode rootNode = mapper.readTree(jsonString);
+            // 2. 准备 StringBuilder 用于高效拼接字符串
+            StringBuilder combinedText = new StringBuilder();
+            // 3. 逐层导航到 chunks 数组
+            // 路径：data -> results (数组) -> chunks (数组) -> text
+            JsonNode resultsNode = rootNode.path("data").path("results");
+            if (resultsNode.isArray()) {
+                for (JsonNode result : resultsNode) {
+                    JsonNode chunksNode = result.path("chunks");
+                    if (chunksNode.isArray()) {
+                        for (JsonNode chunk : chunksNode) {
+                            // 4. 提取 text 字段并拼接
+                            String text = chunk.path("text").asText();
+                            combinedText.append(text);
+                            // 可选：添加换行符以分隔不同 chunk 的文本
+                            combinedText.append("\n");
+                        }
+                    }
+                }
+            }
+            // 5. 输出最终结果
+            finalResult = combinedText.toString();
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return finalResult;
+    }
+
+}
+
