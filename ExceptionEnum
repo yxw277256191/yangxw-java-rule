@@ -1,0 +1,50 @@
+package cn.com.wind.stock.common.exception;
+
+import lombok.Getter;
+
+/**
+ *　异常枚举
+ */
+@Getter
+public enum ExceptionEnum {
+
+    // ------------------通用-----------------
+    PARAMETER_ERROR(20100, "param error！"),
+
+    // -------------------------------------------- 内容相关 -----------------------------------------------------
+    USER_NOT_FOUND(20100, "user not found！"),
+    USER_PASSWORD_ERROR(20101, "user password error！"),
+    USER_PASSWORD_AS_ERROR(20111, "The new password entered cannot match the old password !"),
+    USER_PHONE_EMAIL(20102, "user phone and email both empty！"),
+    USER_PASS_NULL(20103, "user old password empty！"),
+    CREATE_USER_ACCOUNT_ID_REPEAT(20104, "user account exist!"),
+    UPDATE_USER_ID_NULL(20105, "update user id is null!"),
+    VERSION_NAME_EXIST(20106, "user agreement exist!"),
+    MENU_NOT_FOUND(20107, "menu not found！"),
+    MENU_CODE_EXIST(20108, "menu code exist!"),
+    ROLE_NOT_FOUND(20109, "role not found！"),
+    ROLE_CODE_EXIST(20110, "role code exist！"),
+    ADMIN_ROLE_NOT_OPERATE(123, "admin role cannot operate！"),
+    ROLE_RELATION_USER(20111, "role relation user！"),
+    USER_RELATION_ROLE(20112, "login user relation role！"),
+
+    // ------------------快速会话-----------------
+    //QUESTION_BYID(301, "快速问句-根据ID获取失败!"),
+    //QUESTION_SAVE(302, "快速问句-保存失败!"),
+    //QUESTION_UPDATA(303, "快速问句-修改失败!"),
+    //QUESTION_DELETE(304, "快速问句-删除失败!"),
+    QUESTION_BYID(301, "Failed to retrieve based on ID !"),
+    QUESTION_SAVE(302, "save failed !"),
+    QUESTION_UPDATA(303, "update failed !"),
+    QUESTION_DELETE(306, "delete failed !"),
+    ;
+
+    private int code;
+    private String desc;
+
+    ExceptionEnum(int key, String desc) {
+        this.code = key;
+        this.desc = desc;
+    }
+
+}
